@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MedGuardian - Smart Pill Dispenser</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+   <!-- ===== LOGIN OVERLAY ===== -->
+<div id="loginOverlay" class="login-overlay">
+    <div class="login-background"></div>
+    <div class="login-container">
+        
+        <!-- ===== BIG BLINKING ROBOT (BACKGROUND) ===== -->
+        <div class="login-robot-bg">
+
+    <div class="robot-bg-glow"></div>
+
+    <div class="robot-wrapper">
+
+        <img src="/Rawake.png"
+             class="robot-open"
+             alt="Robot">
+
+        <img src="/Rsleep.png"
+             class="robot-closed"
+             alt="Robot Sleeping">
+
+    </div>
+
+</div>
+
+        <!-- ===== LOGIN BOX ===== -->
+        <div class="login-box glass">
+            <div class="login-icon-container">
+                <img src="/robot_Logo.png" alt="MedGuardian Logo" class="robot-icon">
+            </div>
+            <h1 class="login-title">Med<span>Guardian</span></h1>
+            <p class="login-subtitle">Smart Medication Dispenser</p>
+            <div class="login-divider"><span>💊</span></div>
+            <div class="login-form">
+                <div class="login-input-group">
+                    <span class="login-icon">🔒</span>
+                    <input type="password" id="loginPin" placeholder="Enter 4-digit PIN" maxlength="4" autofocus>
+                </div>
+                <button id="loginBtn" class="btn-login" onclick="attemptLogin()">
+                    <span>🔓</span> Unlock Dashboard
+                </button>
+                <div id="loginError" class="login-error hidden">
+                    <span>❌</span> Invalid PIN. Please try again.
+                </div>
+                <div class="login-footer">
+                    <div class="login-status-dot"></div>
+                    <span>System Ready</span>
+                    <span class="login-version">v2.1.0</span>
+                </div>
+            </div>
+
+        <div class="login-decoration login-dec-1"></div>
+        <div class="login-decoration login-dec-2"></div>
+    </div>
+</div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <div class="app-container">
+        <!-- ===== HEADER ===== -->
+        <header class="header glass">
+            <div class="header-left">
+                <div class="logo">
+    <img src="/robot_Logo.png" alt="MedGuardian Logo" class="logo-img">
+    <span class="logo-text">Med<span>Guardian</span></span>
+</div>
+                <div class="status-badge">
+                    <span class="status-dot online"></span>
+                    <span>System Online</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="header-item"><span>📅</span> <span id="currentDate">Loading...</span></div>
+                <div class="header-item"><span>🕐</span> <span id="currentTime">--:--:--</span></div>
+                <button id="syncTimeBtn" class="btn-sync" onclick="setRTCtime()">🔄 Sync Time</button>
+                <button onclick="logout()" class="btn-logout">🔒 Lock</button>
+                <div class="header-item" id="connectionStatus">
+                    <span id="connectionIcon">🔌</span>
+                    <span id="connectionText">Connected</span>
+                </div>
+                <div class="header-item wifi" id="wifiInfo">
+                    <span>📶</span>
+                    <span id="wifiStatusText">Checking...</span>
+                </div>
+                <div class="header-item battery"><span>🔋</span> <span>85%</span></div>
+            </div>
+        </header>
+
+        <!-- RTC Status Bar -->
+        <div class="rtc-status glass">
+            <span>🕐 RTC Time: <strong id="rtcTimeDisplay">--:--:--</strong></span>
+            <span style="font-size: 12px; color: var(--text-secondary);">
+                ℹ️ Click "Sync Time" to update RTC
+            </span>
+        </div>
+
+        <!-- ===== MAIN CONTENT ===== -->
+        <main>
+            <!-- Quick Status Cards -->
+            <section class="section">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                    <h2 class="section-title"><span>📊</span> Real-Time Status</h2>
+                    <button onclick="fetchSensorData()" class="btn-refresh">🔄 Refresh</button>
+                </div>
+                <div class="status-grid">
+                    <div class="status-card glass">
+                        <div class="status-icon temp-icon">🌡️</div>
+                        <div class="status-info">
+                            <span class="status-label">Temperature</span>
+                            <div class="status-value"><span id="tempValue">--</span><span class="unit">°C</span></div>
+                            <div class="progress-track"><div class="progress-fill" id="tempProgress" style="width: 0%"></div></div>
+                        </div>
+                    </div>
+                    <div class="status-card glass">
+                        <div class="status-icon hum-icon">💧</div>
+                        <div class="status-info">
+                            <span class="status-label">Humidity</span>
+                            <div class="status-value"><span id="humValue">--</span><span class="unit">%</span></div>
+                            <div class="progress-track"><div class="progress-fill" id="humProgress" style="width: 0%"></div></div>
+                        </div>
+                    </div>
+                    <!-- <div class="status-card glass">
+                        <div class="status-icon weight-icon">⚖️</div>
+                        <div class="status-info">
+                            <span class="status-label">Cup Weight</span>
+                            <div class="status-value"><span id="weightValue">--</span><span class="unit">g</span></div>
+                            <div class="progress-track"><div class="progress-fill" id="weightProgress" style="width: 0%"></div></div>
+                        </div>
+                    </div> -->
+                    <div class="status-card glass">
+                        <div class="status-icon pills-icon">💊</div>
+                        <div class="status-info">
+                            <span class="status-label">Pill Status</span>
+                            <div class="status-value" id="pillStatus"><span>✅ Ready</span></div>
+                            <div class="status-indicator"><span class="indicator-dot green"></span><span>Active</span></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Pill Dispensers -->
+            <section class="section">
+                <h2 class="section-title"><span>💊</span> Pill Dispensers
+                    <span class="dispenser-badge" id="dispenserCountBadge">0 active</span>
+                    <span style="font-size: 14px; font-weight: 400; color: var(--text-secondary); margin-left: auto;">
+                        ℹ️ Configure in Medication Configuration
+                    </span>
+                </h2>
+                <div class="boxes-grid" id="dispensersGrid">
+                    <div class="empty-state" id="dispensersEmpty">
+                        <span style="font-size: 48px; display: block; margin-bottom: 12px;">⚙️</span>
+                        <p>No active dispensers</p>
+                        <span style="font-size: 12px; color: var(--text-secondary);">
+                            Go to "Medication Configuration" to activate and configure a dispenser
+                        </span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Medication Configuration -->
+            <section class="section">
+                <h2 class="section-title"><span>⚙️</span> Medication Configuration
+                    <span style="font-size: 14px; font-weight: 400; color: var(--text-secondary); margin-left: auto;">
+                        ℹ️ Activate & configure each dispenser
+                    </span>
+                </h2>
+                <div class="config-grid" id="configGrid"></div>
+            </section>
+
+            <!-- Schedule -->
+            <section class="section">
+                <h2 class="section-title"><span>📅</span> Medication Schedule
+                    <span style="font-size: 14px; font-weight: 400; color: var(--text-secondary); margin-left: auto;">
+                        ℹ️ Set date & time
+                    </span>
+                </h2>
+                <div class="schedule-container glass">
+                    <div class="schedule-form">
+                        <div class="form-group date-group">
+                            <label><span>📅</span> Select Date
+                                <span class="helper-badge" id="dateHelperBadge">ℹ️ Today or future</span>
+                            </label>
+                            <div class="date-picker-wrapper">
+                                <span class="date-icon">📅</span>
+                                <input type="date" id="scheduleDate" class="date-input">
+                            </div>
+                            <div class="date-helper" id="dateHelper">
+                                <span>📅</span> Choose today or a future date for your medication
+                            </div>
+                            <div class="quick-dates">
+                                <span style="font-size: 11px; color: var(--text-secondary);">Quick:</span>
+                                <button onclick="addQuickDate(0)" class="quick-date-btn">Today</button>
+                                <button onclick="addQuickDate(1)" class="quick-date-btn">Tomorrow</button>
+                                <button onclick="addQuickDate(7)" class="quick-date-btn">+7 Days</button>
+                            </div>
+                        </div>
+                        <div class="form-group time-group">
+                            <label><span>🕐</span> Time
+                                <span class="helper-badge" id="timeHelperBadge">ℹ️ Must be in the future</span>
+                            </label>
+                            <div class="time-input">
+                                <input type="number" id="scheduleHour" placeholder="H" min="0" max="23" value="12">
+                                <span>:</span>
+                                <input type="number" id="scheduleMinute" placeholder="M" min="0" max="59" value="00">
+                            </div>
+                            <div class="time-helper" id="timeHelper">
+                                <span>⏰</span> Select a future time. The current time is <strong id="currentTimeDisplay">--:--</strong>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label><span>💊</span> Dispenser</label>
+                            <select id="scheduleBox" class="box-select"></select>
+                        </div>
+                        <button class="btn-primary" onclick="addSchedule()"><span>➕</span> Add Schedule</button>
+                    </div>
+                    <div class="schedule-list" id="scheduleList">
+                        <div class="empty-state">
+                            <span>🕐</span>
+                            <p>No schedules set yet</p>
+                            <span style="font-size: 12px; color: var(--text-secondary);">
+                                Pick a date, time, box, and click "Add Schedule"
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- History -->
+            <section class="section">
+                <h2 class="section-title"><span>📜</span> Medication History</h2>
+                <div class="history-container glass">
+                    <div class="history-timeline" id="historyTimeline">
+                        <div class="empty-state"><span>💊</span><p>No history yet</p></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Environmental Gauges -->
+            <section class="section">
+                <h2 class="section-title"><span>📈</span> Environmental Monitoring</h2>
+                <div class="gauge-grid">
+                    <div class="gauge-card glass">
+                        <div class="gauge-container">
+                            <svg viewBox="0 0 120 120" class="gauge-svg">
+                                <circle cx="60" cy="60" r="50" class="gauge-bg"/>
+                                <circle cx="60" cy="60" r="50" class="gauge-progress" id="tempGauge"/>
+                            </svg>
+                            <div class="gauge-center"><span id="tempGaugeValue">--</span><span>°C</span></div>
+                        </div>
+                        <p class="gauge-label">🌡️ Temperature</p>
+                    </div>
+                    <div class="gauge-card glass">
+                        <div class="gauge-container">
+                            <svg viewBox="0 0 120 120" class="gauge-svg">
+                                <circle cx="60" cy="60" r="50" class="gauge-bg"/>
+                                <circle cx="60" cy="60" r="50" class="gauge-progress" id="humGauge"/>
+                            </svg>
+                            <div class="gauge-center"><span id="humGaugeValue">--</span><span>%</span></div>
+                        </div>
+                        <p class="gauge-label">💧 Humidity</p>
+                    </div>
+                    <!-- <div class="gauge-card glass">
+                        <div class="gauge-container">
+                            <svg viewBox="0 0 120 120" class="gauge-svg">
+                                <circle cx="60" cy="60" r="50" class="gauge-bg"/>
+                                <circle cx="60" cy="60" r="50" class="gauge-progress" id="weightGauge"/>
+                            </svg>
+                            <div class="gauge-center"><span id="weightGaugeValue">--</span><span>g</span></div>
+                        </div>
+                        <p class="gauge-label">⚖️ Weight</p>
+                    </div> -->
+                </div>
+            </section>
+
+            <!-- Notifications -->
+            <section class="section">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                    <h2 class="section-title" style="margin-bottom: 0;"><span>🔔</span> Notifications
+                        <span class="badge" id="notificationBadge">0</span>
+                    </h2>
+                    <button onclick="clearNotifications()" class="btn-clear-notifications">🗑️ Clear All</button>
+                </div>
+                <div class="notifications-container glass" id="notificationsContainer">
+                    <div class="empty-state"><span>✅</span><p>All clear!</p></div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer glass">
+            <div class="footer-left">
+                <div class="footer-item"><span class="status-dot online"></span><span>ESP32 Connected</span></div>
+                <div class="footer-item"><span>🔄</span> Last Update: <span id="lastUpdate">--:--:--</span></div>
+                <div class="footer-item"><span>🔄</span> Auto-Refresh: <span id="refreshStatus">Active</span></div>
+            </div>
+            <div class="footer-right">
+                <div class="footer-item"><span>📦</span> Firmware v2.1.0</div>
+            </div>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
