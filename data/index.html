@@ -104,8 +104,12 @@
             </span>
         </div>
 
+
+
         <!-- ===== MAIN CONTENT ===== -->
         <main>
+
+            
             <!-- Quick Status Cards -->
             <section class="section">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
@@ -177,63 +181,140 @@
                 <div class="config-grid" id="configGrid"></div>
             </section>
 
-            <!-- Schedule -->
-            <section class="section">
-                <h2 class="section-title"><span>📅</span> Medication Schedule
-                    <span style="font-size: 14px; font-weight: 400; color: var(--text-secondary); margin-left: auto;">
-                        ℹ️ Set date & time
-                    </span>
-                </h2>
-                <div class="schedule-container glass">
-                    <div class="schedule-form">
-                        <div class="form-group date-group">
-                            <label><span>📅</span> Select Date
-                                <span class="helper-badge" id="dateHelperBadge">ℹ️ Today or future</span>
-                            </label>
-                            <div class="date-picker-wrapper">
-                                <span class="date-icon">📅</span>
-                                <input type="date" id="scheduleDate" class="date-input">
-                            </div>
-                            <div class="date-helper" id="dateHelper">
-                                <span>📅</span> Choose today or a future date for your medication
-                            </div>
-                            <div class="quick-dates">
-                                <span style="font-size: 11px; color: var(--text-secondary);">Quick:</span>
-                                <button onclick="addQuickDate(0)" class="quick-date-btn">Today</button>
-                                <button onclick="addQuickDate(1)" class="quick-date-btn">Tomorrow</button>
-                                <button onclick="addQuickDate(7)" class="quick-date-btn">+7 Days</button>
-                            </div>
-                        </div>
-                        <div class="form-group time-group">
-                            <label><span>🕐</span> Time
-                                <span class="helper-badge" id="timeHelperBadge">ℹ️ Must be in the future</span>
-                            </label>
-                            <div class="time-input">
-                                <input type="number" id="scheduleHour" placeholder="H" min="0" max="23" value="12">
-                                <span>:</span>
-                                <input type="number" id="scheduleMinute" placeholder="M" min="0" max="59" value="00">
-                            </div>
-                            <div class="time-helper" id="timeHelper">
-                                <span>⏰</span> Select a future time. The current time is <strong id="currentTimeDisplay">--:--</strong>
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label><span>💊</span> Dispenser</label>
-                            <select id="scheduleBox" class="box-select"></select>
-                        </div>
-                        <button class="btn-primary" onclick="addSchedule()"><span>➕</span> Add Schedule</button>
-                    </div>
-                    <div class="schedule-list" id="scheduleList">
-                        <div class="empty-state">
-                            <span>🕐</span>
-                            <p>No schedules set yet</p>
-                            <span style="font-size: 12px; color: var(--text-secondary);">
-                                Pick a date, time, box, and click "Add Schedule"
-                            </span>
-                        </div>
+        
+          <!-- ===== SCHEDULE ===== -->
+<section class="section">
+    <div class="schedule-header">
+        <div class="schedule-header-left">
+            <h2 class="section-title"><span>📅</span> Medication Schedule</h2>
+            <div class="robot-message" id="scheduleRobotMessage">
+                <span class="robot-avatar">😊</span>
+                <span class="robot-text">Let's schedule your medication together.</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="schedule-container glass">
+        <!-- Step 1: How often? -->
+        <div class="schedule-step">
+            <div class="step-label">
+                <span class="step-number">1</span>
+                <span class="step-title">How often?</span>
+            </div>
+            <div class="schedule-type-selector" id="scheduleTypeSelector">
+                <button class="type-btn active" data-type="ONCE">Once</button>
+                <button class="type-btn" data-type="DAILY">Daily</button>
+                <button class="type-btn" data-type="WEEKLY">Weekly</button>
+                <button class="type-btn" data-type="MONTHLY">Monthly</button>
+                <button class="type-btn" data-type="YEARLY">Yearly</button>
+            </div>
+            <input type="hidden" id="scheduleType" value="ONCE">
+        </div>
+
+        <!-- Step 2: When? (Dynamic) -->
+        <div class="schedule-step">
+            <div class="step-label">
+                <span class="step-number">2</span>
+                <span class="step-title" id="whenTitle">When?</span>
+            </div>
+            <div id="dynamicFields" class="schedule-dynamic-fields">
+                <!-- Date (ONCE) -->
+                <div class="form-group" id="dateGroup">
+                    <label>Date</label>
+                    <div class="date-picker-wrapper">
+                        <span class="date-icon">📅</span>
+                        <input type="date" id="scheduleDate" class="date-input">
                     </div>
                 </div>
-            </section>
+
+                <!-- Weekly (day of week) -->
+                <div class="form-group" id="weeklyGroup" style="display:none;">
+                    <label>Day of Week</label>
+                    <select id="scheduleWeekday" class="box-select">
+                        <option value="0">Sunday</option>
+                        <option value="1">Monday</option>
+                        <option value="2">Tuesday</option>
+                        <option value="3">Wednesday</option>
+                        <option value="4">Thursday</option>
+                        <option value="5">Friday</option>
+                        <option value="6">Saturday</option>
+                    </select>
+                </div>
+
+                <!-- Monthly (day of month) -->
+                <div class="form-group" id="monthlyGroup" style="display:none;">
+                    <label>Day of Month</label>
+                    <input type="number" id="scheduleDayOfMonth" min="1" max="31" value="1" class="date-input" style="width:80px;">
+                </div>
+
+                <!-- Yearly (month + day) -->
+                <div class="form-group" id="yearlyGroup" style="display:none;">
+                    <label>Every</label>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <select id="scheduleYearlyMonth" class="box-select" style="flex:1;">
+                            <option value="1">January</option>  <option value="2">February</option>
+                            <option value="3">March</option>    <option value="4">April</option>
+                            <option value="5">May</option>      <option value="6">June</option>
+                            <option value="7">July</option>     <option value="8">August</option>
+                            <option value="9">September</option><option value="10">October</option>
+                            <option value="11">November</option><option value="12">December</option>
+                        </select>
+                        <input type="number" id="scheduleYearlyDay" min="1" max="31" value="1" class="date-input" style="width:70px;">
+                    </div>
+                </div>
+
+                <!-- Time (always visible) -->
+                <div class="form-group time-group">
+                    <label>Time</label>
+                    <div class="time-input">
+                        <input type="number" id="scheduleHour" placeholder="H" min="0" max="23" value="12">
+                        <span>:</span>
+                        <input type="number" id="scheduleMinute" placeholder="M" min="0" max="59" value="00">
+                    </div>
+                </div>
+            </div>
+            <!-- Single validation message -->
+            <div id="scheduleValidation" class="schedule-validation success">
+                <span>✅</span> <span>Ready to schedule</span>
+            </div>
+        </div>
+
+        <!-- Step 3: Which medicine? -->
+        <div class="schedule-step">
+            <div class="step-label">
+                <span class="step-number">3</span>
+                <span class="step-title">Which medicine?</span>
+            </div>
+            <div class="form-group">
+                <select id="scheduleBox" class="box-select"></select>
+            </div>
+        </div>
+
+        <!-- Step 4: Confirm -->
+        <div class="schedule-step schedule-confirm">
+            <button class="btn-schedule" onclick="addSchedule()">
+                <span>➕</span> Schedule Medication
+            </button>
+        </div>
+    </div>
+
+    <!-- Schedule List -->
+    <div class="schedule-list-container glass">
+        <div class="schedule-list-header">
+            <span>📋 Your Medications</span>
+            <span class="schedule-count" id="scheduleCount">0 schedules</span>
+        </div>
+        <div class="schedule-list" id="scheduleList">
+            <div class="empty-state">
+                <span>💊</span>
+                <p>No medications scheduled yet</p>
+                <span style="font-size: 12px; color: var(--text-secondary);">
+                    Use the form above to add your first schedule
+                </span>
+            </div>
+        </div>
+    </div>
+</section>
 
             <!-- History -->
             <section class="section">

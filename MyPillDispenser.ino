@@ -11,6 +11,8 @@
 #include <LittleFS.h>
 #include <WiFi.h>
 
+#include "schedule_helpers.h"
+
 // Sensors
 #include <DHT.h>
 #include <Adafruit_Sensor.h>
@@ -20,6 +22,7 @@
 #include <ArduinoJson.h>
 
 #include "OLEDManager.h"
+#include "AudioManager.h"
 
 // ============================
 // CORRECTED Pin Definitions
@@ -69,8 +72,9 @@ void printHeap(const char *label)
 // #define HX711_DOUT 35 // GPIO35 = INPUT ONLY (perfect for DOUT)
 // #define HX711_SCK 33  // GPIO33 = OUTPUT capable (clock signal)
 
-// ===== IR Break Beam (Input only) =====
-#define IR_SENSOR_PIN 34 // GPIO34 = INPUT ONLY
+// ===== Cup Sensor (LDR) =====
+#define LDR_PIN 34         // GPIO34 = INPUT ONLY (ADC1) - same pin previously wired for the IR sensor
+#define LDR_THRESHOLD 1500 // ⚠️ ADJUST EXPERIMENTALLY - see calibration note above checkCupState()
 
 // ===== Audio =====
 #define BUZZER_PIN 4
@@ -98,9 +102,10 @@ void printHeap(const char *label)
 // WiFi Configuration - Add after includes
 // ============================
 // ⚠️ CHANGE THESE TO YOUR HOME WiFi
-const char *WIFI_SSID = "inwi Home 4G 54A273"; // ← YOUR WiFi name
-const char *WIFI_PASSWORD = "36751273";        // ← YOUR WiFi password
-
+// const char *WIFI_SSID = "Redmi Note 14 Pro+";  // ← YOUR WiFi name
+// const char *WIFI_PASSWORD = "gn76gwfzdtwabev"; // ← YOUR WiFi password
+const char *WIFI_SSID = "Dar America";     // ← YOUR WiFi name
+const char *WIFI_PASSWORD = "C@asablanca"; // ← YOUR WiFi password
 // WiFi settings
 const unsigned long WIFI_TIMEOUT = 30000; // 30 seconds
 bool wifiConnected = false;
@@ -115,6 +120,16 @@ const char *ADMIN_PIN = "1234"; // ← CHANGE THIS PIN!
 bool sessionValid = false;
 unsigned long sessionStartTime = 0;
 const unsigned long SESSION_TIMEOUT = 3600000; // 1 hour (in milliseconds)
+
+// Schedule recurrence types
+enum ScheduleType : uint8_t
+{
+    ONCE = 0,
+    DAILY = 1,
+    WEEKLY = 2,
+    MONTHLY = 3,
+    YEARLY = 4
+};
 
 // ============================
 // History & Notifications Storage
@@ -132,6 +147,25 @@ const unsigned long SESSION_TIMEOUT = 3600000; // 1 hour (in milliseconds)
 #define NOTIFICATION_RETENTION_DAYS 7 // Delete notifications after 7 days
 #define CLEANUP_INTERVAL 86400000     // Run cleanup once per day (24 hours)
 unsigned long lastCleanupTime = 0;
+
+// ============================
+// OLED Pill Counts & Reminder Timers
+// ============================
+
+// Pill counts for the OLED Pill Status screen
+PillBox pillBoxes[2] = {
+    {1, 0}, // Box 1
+    {2, 0}  // Box 2
+};
+const int NUM_BOXES = 2;
+
+// Progressive reminder timers (30s worried, 60s angry)
+const unsigned long REMINDER_WARNING_MS = 30000;
+const unsigned long REMINDER_MISSED_MS = 60000;
+
+unsigned long reminderTriggerTime = 0;
+bool reminderWarningDone = false;
+bool missedDoseTriggered = false;
 
 // ============================
 // Global Variables
@@ -154,6 +188,7 @@ bool rtcInitialized = false;
 Schedule medSchedules[MAX_SCHEDULES];
 
 OLEDManager oledManager;
+AudioManager audioManager;
 // Dispensing state
 bool isDispensing1 = false;
 bool isDispensing2 = false;
@@ -189,11 +224,18 @@ int buzzerFrequency = 0;
 unsigned long buzzerStartTime = 0;
 unsigned long buzzerDuration = 0;
 
+// Fallback sensor values (drifting)
+float fallbackTemp = 20.0;
+float fallbackHum = 50.0;
+unsigned long lastFallbackUpdate = 0;
+
 // ============================
 // Function Prototypes
 // ============================
 void initSchedules();
 void setupWebServer();
+const char *medicineNameLookup(int box);
+void checkCupState();
 void startBuzzer(int frequency, int duration);
 bool triggerDispense(int box, int *remainingQuantity = nullptr);
 bool reservePillForDispense(int box, String &medicine, int &remainingQuantity);
@@ -217,6 +259,96 @@ String getMedicationSummary();
 // ============================
 // WiFi Connection Functions
 // ============================
+
+// ============================
+// Cup Open / Close Detection (non-blocking, edge-triggered)
+// ----------------------------
+// Uses the existing IR break-beam sensor to notice when the user opens the
+// dispensing cup to take the pill, then closes it again. Purely a UI/UX
+// touch - fires one OLED screen + one notification per open, one per close.
+// It doesn't gate, block, or interact with scheduling/dispensing at all.
+// ============================
+// ---- Calibration note ----
+// Before relying on LDR_THRESHOLD, temporarily add this inside loop() to
+// find your real values, then remove it again:
+//     Serial.println(analogRead(LDR_PIN));
+// Cup covering the sensor -> low numbers (e.g. ~400-500)
+// Cup removed              -> high numbers (e.g. ~2500-2700)
+// Pick LDR_THRESHOLD roughly halfway between what you observe, then flip
+// the '>' below to '<' if open/closed come out backwards for your wiring.
+int readLDR()
+{
+    // Average a few samples - a demo table isn't perfectly still, and a
+    // single analogRead() can jitter enough to false-trigger near the
+    // threshold.
+    long sum = 0;
+    const int SAMPLES = 5;
+    for (int i = 0; i < SAMPLES; i++)
+    {
+        sum += analogRead(LDR_PIN);
+    }
+    return sum / SAMPLES;
+}
+
+bool readCupSensor()
+{
+    // Hysteresis: only flip state once the reading is clearly past the
+    // threshold (+/-50), not the instant it crosses it. Stops rapid
+    // open/closed flickering when the light level hovers near the line.
+    static bool cupOpenState = false;
+
+    int value = readLDR();
+
+    Serial.printf("LDR reading: %d, threshold: %d, cupOpenState: %s\n", value, LDR_THRESHOLD, cupOpenState ? "OPEN" : "CLOSED");
+    if (value > LDR_THRESHOLD + 50)
+        cupOpenState = true; // more light reaching the LDR = cup removed
+    else if (value < LDR_THRESHOLD - 50)
+        cupOpenState = false; // less light = cup covering the sensor
+
+    return cupOpenState; // true = cup open
+}
+
+void checkCupState()
+{
+    static bool lastCupState = false;
+    static bool cupOpenedSinceLastClose = false;
+
+    bool cupState = readCupSensor();
+
+    if (cupState && !lastCupState)
+    {
+        // Cup just opened
+        appendNotification("info", "Cup opened");
+        oledManager.onCupOpened();
+        cupOpenedSinceLastClose = true;
+    }
+
+    if (!cupState && lastCupState && cupOpenedSinceLastClose)
+    {
+        // Cup just closed after being opened - medication collected
+        appendNotification("success", "Medication collected");
+        oledManager.onMedicationCollected();
+        cupOpenedSinceLastClose = false;
+    }
+
+    lastCupState = cupState;
+}
+
+// ============================
+// OLED medicine-name lookup
+// ----------------------------
+// Feeds the OLED's "Next Dose" screen from the SAME source the website
+// reads (Preferences), so both always show the same medicine name -
+// previously this callback was never registered, so the OLED fell back
+// to a blank/generic label instead of the real medicine name.
+// ============================
+const char *medicineNameLookup(int box)
+{
+    static char nameBuf[24];
+    String name = preferences.getString(("med_name_" + String(box)).c_str(), "Box " + String(box));
+    name.toCharArray(nameBuf, sizeof(nameBuf));
+    return nameBuf;
+}
 
 void checkWiFiConnection()
 {
@@ -364,11 +496,9 @@ auto requireAuth = [](ArRequestHandlerFunction handler)
         handler(request);
     };
 };
-
 // ============================
 // Schedule Management
 // ============================
-
 void initSchedules()
 {
     for (int i = 0; i < MAX_SCHEDULES; i++)
@@ -380,6 +510,9 @@ void initSchedules()
         medSchedules[i].minute = preferences.getInt(("m" + String(i)).c_str(), -1);
         medSchedules[i].box = preferences.getInt(("b" + String(i)).c_str(), 1);
         medSchedules[i].active = preferences.getBool(("a" + String(i)).c_str(), false);
+        // Load recurrence fields
+        medSchedules[i].type = (ScheduleType)preferences.getUChar(("t" + String(i)).c_str(), ONCE);
+        medSchedules[i].weekday = preferences.getUChar(("w" + String(i)).c_str(), 0);
 
         if (medSchedules[i].active)
         {
@@ -390,6 +523,51 @@ void initSchedules()
     }
 }
 
+bool matchOnce(const Schedule &s, const RtcDateTime &now)
+{
+    return (now.Year() == s.year && now.Month() == s.month && now.Day() == s.day);
+}
+bool matchDaily(const Schedule &s, const RtcDateTime &now)
+{
+    return true; // any day
+}
+bool matchWeekly(const Schedule &s, const RtcDateTime &now)
+{
+    uint8_t rtcDow = now.DayOfWeek();
+    uint8_t internalDow = scheduleWeekdayFromRtc(rtcDow);
+    return (internalDow == s.weekday);
+}
+bool matchMonthly(const Schedule &s, const RtcDateTime &now)
+{
+    return (now.Day() == s.day);
+}
+bool matchYearly(const Schedule &s, const RtcDateTime &now)
+{
+    return (now.Month() == s.month && now.Day() == s.day);
+}
+
+bool matchesSchedule(const Schedule &s, const RtcDateTime &now)
+{
+    if (!s.active)
+        return false;
+    if (now.Hour() != s.hour || now.Minute() != s.minute)
+        return false;
+    switch (s.type)
+    {
+    case ONCE:
+        return matchOnce(s, now);
+    case DAILY:
+        return matchDaily(s, now);
+    case WEEKLY:
+        return matchWeekly(s, now);
+    case MONTHLY:
+        return matchMonthly(s, now);
+    case YEARLY:
+        return matchYearly(s, now);
+    default:
+        return false;
+    }
+}
 // ============================
 // Setup
 // ============================
@@ -419,7 +597,7 @@ void setup()
     pinMode(LED2_PIN, OUTPUT);
     pinMode(BUTTON1_PIN, INPUT_PULLUP);
     pinMode(BUTTON2_PIN, INPUT_PULLUP);
-    pinMode(IR_SENSOR_PIN, INPUT);
+    pinMode(LDR_PIN, INPUT);
     pinMode(BUZZER_PIN, OUTPUT);
 
     digitalWrite(LED1_PIN, LOW);
@@ -434,6 +612,20 @@ void setup()
     Wire.begin(SDA_PIN, SCL_PIN);
     oledManager.begin();
     printHeap("After OLED");
+
+    // ---- DFPlayer Mini (voice) ----
+    // If the module or SD card isn't detected, audioManager.isAvailable()
+    // stays false and every play*() call becomes a silent no-op - the rest
+    // of the project (OLED, servos, WiFi, schedules...) is unaffected.
+    if (audioManager.begin(DFPLAYER_RX, DFPLAYER_TX))
+    {
+        Serial.println("🔊 Voice prompts enabled");
+    }
+    else
+    {
+        Serial.println("🔇 Voice prompts disabled (continuing without audio)");
+    }
+    printHeap("After AudioManager");
 
     // ============================================================
     // RTC DS1302 – COMPLETE BLOCK (comment out for decisive test)
@@ -520,6 +712,16 @@ void setup()
     oledManager.setSchedules(medSchedules, MAX_SCHEDULES);
     printHeap("After setSchedules");
 
+    // ✅ Keep the OLED's "Next Dose" medicine name in sync with the website
+    oledManager.setMedicineLookup(medicineNameLookup);
+
+    // ---- Initialize Pill Counts for OLED ----
+    for (int i = 0; i < NUM_BOXES; i++)
+    {
+        pillBoxes[i].count = preferences.getInt(("med_qty_" + String(pillBoxes[i].box)).c_str(), 0);
+    }
+    oledManager.setPillCounts(pillBoxes, NUM_BOXES);
+
     // ============================================================
     // WiFi Setup – MUST be done BEFORE web server
     // ============================================================
@@ -574,6 +776,9 @@ void setup()
     server.begin();
     Serial.println("✅ Web Server Started");
     printHeap("After server.begin()");
+
+    // ---- Startup voice greeting (0001) - played once ----
+    audioManager.playWelcome();
 
     // ---- Startup beep ----
     startBuzzer(1000, 200);
@@ -677,55 +882,94 @@ void setupWebServer()
     // ===== Schedule update endpoint =====
     server.on("/updateSchedule", HTTP_POST, requireAuth([](AsyncWebServerRequest *request)
                                                         {
-        if (request->hasParam("index", true) &&
-            request->hasParam("year", true) &&
-            request->hasParam("month", true) &&
-            request->hasParam("day", true) &&
-            request->hasParam("hour", true) &&
-            request->hasParam("min", true) &&
-            request->hasParam("box", true))
-        {
-            int index = request->getParam("index", true)->value().toInt();
-            int y = request->getParam("year", true)->value().toInt();
-            int M = request->getParam("month", true)->value().toInt();
-            int d = request->getParam("day", true)->value().toInt();
-            int h = request->getParam("hour", true)->value().toInt();
-            int m = request->getParam("min", true)->value().toInt();
-            int b = request->getParam("box", true)->value().toInt();
+       if (request->hasParam("index", true) &&
+        request->hasParam("year", true) &&
+        request->hasParam("month", true) &&
+        request->hasParam("day", true) &&
+        request->hasParam("hour", true) &&
+        request->hasParam("min", true) &&
+        request->hasParam("box", true))
+    {
+        int index = request->getParam("index", true)->value().toInt();
+        int y = request->getParam("year", true)->value().toInt();
+        int M = request->getParam("month", true)->value().toInt();
+        int d = request->getParam("day", true)->value().toInt();
+        int h = request->getParam("hour", true)->value().toInt();
+        int m = request->getParam("min", true)->value().toInt();
+        int b = request->getParam("box", true)->value().toInt();
 
-            if (index >= 0 && index < MAX_SCHEDULES)
-            {
-                if (y < 2000 || y > 2100 || M < 1 || M > 12 || d < 1 || d > 31 ||
-                    h < 0 || h > 23 || m < 0 || m > 59 || b < 1 || b > 2)
-                {
-                    request->send(400, "text/plain", "Invalid values");
-                    return;
-                }
+        // Parse recurrence (default to ONCE if missing)
+        int type = ONCE;
+        int weekday = 0;
+        if (request->hasParam("type", true))
+            type = request->getParam("type", true)->value().toInt();
+        if (request->hasParam("weekday", true))
+            weekday = request->getParam("weekday", true)->value().toInt();
 
-                medSchedules[index] = {y, M, d, h, m, b, true};
+        if (type < ONCE || type > YEARLY) type = ONCE;
+        if (weekday < 0 || weekday > 6) weekday = 0;
 
-                preferences.putInt(("y" + String(index)).c_str(), y);
-                preferences.putInt(("M" + String(index)).c_str(), M);
-                preferences.putInt(("d" + String(index)).c_str(), d);
-                preferences.putInt(("h" + String(index)).c_str(), h);
-                preferences.putInt(("m" + String(index)).c_str(), m);
-                preferences.putInt(("b" + String(index)).c_str(), b);
-                preferences.putBool(("a" + String(index)).c_str(), true);
+        // Validate based on type
+        bool valid = true;
+        if (index < 0 || index >= MAX_SCHEDULES) valid = false;
+        if (h < 0 || h > 23 || m < 0 || m > 59 || b < 1 || b > 2) valid = false;
 
-                request->send(200, "text/plain", "Schedule updated");
-                Serial.printf("📅 Schedule %d added: %04d-%02d-%02d %02d:%02d - Box %d\n",
-                              index, y, M, d, h, m, b);
-                oledManager.onScheduleAdded();   // shows "Next Medication" briefly
-            }
-            else
-            {
-                request->send(400, "text/plain", "Invalid index");
-            }
+        switch ((ScheduleType)type) {
+            case ONCE:
+                if (y < 2000 || y > 2100 || M < 1 || M > 12 || d < 1 || d > 31) valid = false;
+                break;
+            case DAILY:
+                // No date validation needed (year/month/day are ignored)
+                break;
+            case WEEKLY:
+                if (weekday < 0 || weekday > 6) valid = false;
+                break;
+            case MONTHLY:
+                if (d < 1 || d > 31) valid = false;
+                break;
+            case YEARLY:
+                if (M < 1 || M > 12 || d < 1 || d > 31) valid = false;
+                break;
+            default:
+                valid = false;
         }
-        else
-        {
-            request->send(400, "text/plain", "Missing parameters");
-        } }));
+
+        if (!valid) {
+            request->send(400, "text/plain", "Invalid values");
+            return;
+        }
+
+        // Save schedule
+        medSchedules[index].year    = y;
+        medSchedules[index].month   = M;
+        medSchedules[index].day     = d;
+        medSchedules[index].hour    = h;
+        medSchedules[index].minute  = m;
+        medSchedules[index].box     = b;
+        medSchedules[index].active  = true;
+        medSchedules[index].type    = (ScheduleType)type;
+        medSchedules[index].weekday = weekday;
+
+        // Store in Preferences
+        preferences.putInt(("y" + String(index)).c_str(), y);
+        preferences.putInt(("M" + String(index)).c_str(), M);
+        preferences.putInt(("d" + String(index)).c_str(), d);
+        preferences.putInt(("h" + String(index)).c_str(), h);
+        preferences.putInt(("m" + String(index)).c_str(), m);
+        preferences.putInt(("b" + String(index)).c_str(), b);
+        preferences.putBool(("a" + String(index)).c_str(), true);
+        preferences.putUChar(("t" + String(index)).c_str(), type);
+        preferences.putUChar(("w" + String(index)).c_str(), weekday);
+
+        request->send(200, "text/plain", "Schedule updated");
+        Serial.printf("📅 Schedule %d added: %04d-%02d-%02d %02d:%02d - Box %d (type: %d, weekday: %d)\n",
+                      index, y, M, d, h, m, b, type, weekday);
+        oledManager.onScheduleAdded();
+    }
+    else
+    {
+        request->send(400, "text/plain", "Missing parameters");
+    } }));
 
     // ===== Delete schedule endpoint =====
     server.on("/deleteSchedule", HTTP_POST, requireAuth([](AsyncWebServerRequest *request)
@@ -758,70 +1002,31 @@ void setupWebServer()
         request->send(200, "text/plain", "Emergency stop activated"); }));
 
     // ===== GET SCHEDULES endpoint =====
+
     server.on("/getSchedules", HTTP_GET, [](AsyncWebServerRequest *request)
               {
-        String json = "[";
-        int count = 0;
-        for (int i = 0; i < MAX_SCHEDULES; i++)
+    String json = "[";
+    int count = 0;
+    for (int i = 0; i < MAX_SCHEDULES; i++)
+    {
+        if (medSchedules[i].active)
         {
-            if (medSchedules[i].active)
-            {
-                if (count > 0)
-                    json += ",";
-                json += "{\"index\":" + String(i) +
-                        ",\"year\":" + String(medSchedules[i].year) +
-                        ",\"month\":" + String(medSchedules[i].month) +
-                        ",\"day\":" + String(medSchedules[i].day) +
-                        ",\"hour\":" + String(medSchedules[i].hour) +
-                        ",\"minute\":" + String(medSchedules[i].minute) +
-                        ",\"box\":" + String(medSchedules[i].box) + "}";
-                count++;
-            }
+            if (count > 0) json += ",";
+            json += "{\"index\":" + String(i) +
+                    ",\"year\":" + String(medSchedules[i].year) +
+                    ",\"month\":" + String(medSchedules[i].month) +
+                    ",\"day\":" + String(medSchedules[i].day) +
+                    ",\"hour\":" + String(medSchedules[i].hour) +
+                    ",\"minute\":" + String(medSchedules[i].minute) +
+                    ",\"box\":" + String(medSchedules[i].box) +
+                    ",\"type\":" + String(medSchedules[i].type) +
+                    ",\"weekday\":" + String(medSchedules[i].weekday) +
+                    "}";
+            count++;
         }
-        json += "]";
-        request->send(200, "application/json", json); });
-
-    // ===== SET TIME endpoint =====
-    server.on("/setTime", HTTP_POST, requireAuth([](AsyncWebServerRequest *request)
-                                                 {
-        if (!rtcInitialized)
-        {
-            request->send(500, "text/plain", "RTC not available");
-            return;
-        }
-
-        if (request->hasParam("year", true) &&
-            request->hasParam("month", true) &&
-            request->hasParam("day", true) &&
-            request->hasParam("hour", true) &&
-            request->hasParam("minute", true) &&
-            request->hasParam("second", true))
-        {
-            int y = request->getParam("year", true)->value().toInt();
-            int M = request->getParam("month", true)->value().toInt();
-            int d = request->getParam("day", true)->value().toInt();
-            int h = request->getParam("hour", true)->value().toInt();
-            int m = request->getParam("minute", true)->value().toInt();
-            int s = request->getParam("second", true)->value().toInt();
-
-            if (y < 2000 || y > 2100 || M < 1 || M > 12 || d < 1 || d > 31 ||
-                h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59)
-            {
-                request->send(400, "text/plain", "Invalid date/time values");
-                return;
-            }
-
-            Rtc.SetDateTime(RtcDateTime(y, M, d, h, m, s));
-            request->send(200, "text/plain", "Time set successfully");
-            Serial.printf("🕐 RTC manually set to: %04d-%02d-%02d %02d:%02d:%02d\n",
-                          y, M, d, h, m, s);
-            oledManager.onUserInteraction(); // <-- add this
-        }
-        else
-        {
-            request->send(400, "text/plain", "Missing parameters");
-        } }));
-
+    }
+    json += "]";
+    request->send(200, "application/json", json); });
     // ===== Activate/Deactivate Dispenser =====
     server.on("/activateDispenser", HTTP_POST, requireAuth([](AsyncWebServerRequest *request)
                                                            {
@@ -845,19 +1050,20 @@ void setupWebServer()
     server.on("/saveMedicine", HTTP_POST, requireAuth([](AsyncWebServerRequest *request)
                                                       {
         if (request->hasParam("id", true) &&
-            request->hasParam("medicine", true) &&
-            request->hasParam("quantity", true))
+            request->hasParam("medicine", true))
         {
             int id = request->getParam("id", true)->value().toInt();
             String medicine = request->getParam("medicine", true)->value();
-            int quantity = request->getParam("quantity", true)->value().toInt();
 
+            // Stock quantity is no longer part of this endpoint - it's only
+            // ever changed via /addPills (Refill Dispenser). This keeps the
+            // existing med_qty_X untouched, so pillBoxes[]/OLED stay correct
+            // without needing to re-sync them here.
             preferences.putString(("med_name_" + String(id)).c_str(), medicine);
-            preferences.putInt(("med_qty_" + String(id)).c_str(), quantity);
 
-            Serial.printf("💊 Dispenser %d: %s (%d pills)\n", id, medicine.c_str(), quantity);
+            Serial.printf("💊 Dispenser %d: %s\n", id, medicine.c_str());
             request->send(200, "text/plain", "OK");
-            oledManager.onUserInteraction(); // <-- add this
+            oledManager.onUserInteraction();
         }
         else
         {
@@ -877,6 +1083,18 @@ void setupWebServer()
 
             preferences.putInt(("med_qty_" + String(id)).c_str(), quantity);
             preferences.putString(("med_name_" + String(id)).c_str(), medicine);
+
+            // ✅ Keep the OLED's Pill Status screen in sync with the website -
+            // it reads from pillBoxes[] (RAM), not from preferences directly.
+            for (int i = 0; i < NUM_BOXES; i++)
+            {
+                if (pillBoxes[i].box == id)
+                {
+                    pillBoxes[i].count = quantity;
+                    break;
+                }
+            }
+            oledManager.setPillCounts(pillBoxes, NUM_BOXES);
 
             Serial.printf("📊 Dispenser %d updated: %s (%d remaining)\n", id, medicine.c_str(), quantity);
             request->send(200, "text/plain", "OK");
@@ -927,6 +1145,52 @@ void setupWebServer()
     }
     json += "}";
     request->send(200, "application/json", json); }));
+
+    // ===== Refill endpoint =====
+    server.on("/addPills", HTTP_POST, requireAuth([](AsyncWebServerRequest *request)
+                                                  {
+    if (!request->hasParam("id", true) || !request->hasParam("amount", true)) {
+        request->send(400, "text/plain", "Missing parameters");
+        return;
+    }
+
+    int id = request->getParam("id", true)->value().toInt();
+    int amount = request->getParam("amount", true)->value().toInt();
+
+    if (id < 1 || id > NUM_BOXES || amount <= 0) {
+        request->send(400, "text/plain", "Invalid values");
+        return;
+    }
+
+    // ✅ Find the correct index by matching the box number (future‑proof)
+    int index = -1;
+    for (int i = 0; i < NUM_BOXES; i++) {
+        if (pillBoxes[i].box == id) {
+            index = i;
+            break;
+        }
+    }
+    if (index == -1) {
+        request->send(400, "text/plain", "Unknown dispenser");
+        return;
+    }
+
+    int currentQty = pillBoxes[index].count;
+    int newQty = currentQty + amount;
+
+    // Update RAM
+    pillBoxes[index].count = newQty;
+    oledManager.setPillCounts(pillBoxes, NUM_BOXES);
+
+    // ✅ Save to Preferences – using the exact same key as saveMedicine()
+    String qtyKey = "med_qty_" + String(id);
+    preferences.putInt(qtyKey.c_str(), newQty);
+
+    // Trigger OLED refill animation
+    oledManager.onRefill(id, newQty);
+    audioManager.playRefill(); // 0010 - "Refill completed successfully"
+
+    request->send(200, "text/plain", String(newQty)); }));
 
     // ===== HISTORY ENDPOINTS =====
     server.on("/history", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -1068,6 +1332,7 @@ void emergencyStop()
     }
 
     emergencyActive = true;
+    audioManager.stopAll(); // silence any in-progress/queued voice line immediately
     emergencyFlashCount = 0;
     lastEmergencyFlash = millis();
 
@@ -1141,11 +1406,40 @@ bool reservePillForDispense(int box, String &medicine, int &remainingQuantity)
 
     remainingQuantity = currentQuantity - 1;
     preferences.putInt(quantityKey.c_str(), remainingQuantity);
+
+    // Update the OLED pill status array
+    for (int i = 0; i < NUM_BOXES; i++)
+    {
+        if (pillBoxes[i].box == box)
+        {
+            pillBoxes[i].count = remainingQuantity;
+            break;
+        }
+    }
+    oledManager.setPillCounts(pillBoxes, NUM_BOXES);
+
+    // If the box just became empty, trigger an immediate alert
+    if (remainingQuantity == 0)
+    {
+        char detail[8];
+        snprintf(detail, sizeof(detail), "Box %d", box);
+        oledManager.triggerAlert("No Pills", detail); // Renders "BOX EMPTY"
+    }
+
     return true;
 }
 
 bool triggerDispense(int box, int *remainingQuantity)
 {
+    // If the user is taking medication after a missed dose, clear the alert
+    if (missedDoseTriggered)
+    {
+        oledManager.clearAlert();         // Removes the "PLEASE TAKE" screen
+        oledManager.clearReminderState(); // Clears the worried/angry mood
+        missedDoseTriggered = false;
+        reminderWarningDone = false;
+        reminderTriggerTime = 0;
+    }
 
     Serial.println("triggerDispense() called");
 
@@ -1179,6 +1473,7 @@ bool triggerDispense(int box, int *remainingQuantity)
         isDispensing1 = true;
         Serial.println("💊 Dispensing Box 1");
         startBuzzer(800, 100);
+        audioManager.playMedicationReady(); // 0003 - "Your medication is ready"
 
         // ✅ Auto-log history
         appendHistory(medicine.c_str(), 1, "Dispensed");
@@ -1193,6 +1488,7 @@ bool triggerDispense(int box, int *remainingQuantity)
         isDispensing2 = true;
         Serial.println("💊 Dispensing Box 2");
         startBuzzer(800, 100);
+        audioManager.playMedicationReady(); // 0003 - "Your medication is ready"
 
         // ✅ Auto-log history
         appendHistory(medicine.c_str(), 2, "Dispensed");
@@ -1218,6 +1514,8 @@ void updateDispensing()
         Serial.println("✅ Box 1 dispense complete");
         oledManager.onDispenseComplete();
         startBuzzer(1200, 50);
+        audioManager.playDispenseSuccess(); // 0008, then chains into 0009 below
+        audioManager.playThankYou();        // 0009 - queued, plays right after 0008
 
         // ✅ Log success
         appendNotification("success", "Box 1 dispense complete");
@@ -1231,6 +1529,8 @@ void updateDispensing()
         Serial.println("✅ Box 2 dispense complete");
         oledManager.onDispenseComplete();
         startBuzzer(1200, 50);
+        audioManager.playDispenseSuccess(); // 0008, then chains into 0009 below
+        audioManager.playThankYou();        // 0009 - queued, plays right after 0008
 
         // ✅ Log success
         appendNotification("success", "Box 2 dispense complete");
@@ -1264,26 +1564,22 @@ void checkButtons()
 // ============================
 // Schedule Management
 // ============================
+
 void checkSchedule()
 {
-
-    // ✅ Check if RTC is available
     if (!rtcInitialized)
         return;
 
-    // Read RTC without blocking
     RtcDateTime now = Rtc.GetDateTime();
 
     for (int i = 0; i < MAX_SCHEDULES; i++)
     {
-        if (medSchedules[i].active &&
-            now.Year() == medSchedules[i].year &&
-            now.Month() == medSchedules[i].month &&
-            now.Day() == medSchedules[i].day &&
-            now.Hour() == medSchedules[i].hour &&
-            now.Minute() == medSchedules[i].minute)
-        {
+        if (!medSchedules[i].active)
+            continue;
 
+        if (matchesSchedule(medSchedules[i], now))
+        {
+            // Prevent duplicate triggers in the same minute
             bool alreadyTriggered =
                 lastTriggeredYear[i] == now.Year() &&
                 lastTriggeredMonth[i] == now.Month() &&
@@ -1293,99 +1589,191 @@ void checkSchedule()
 
             if (!alreadyTriggered)
             {
-                // Get medicine name from Preferences
                 static char medBuf[32];
-                String medName = preferences.getString(("med_name_" + String(medSchedules[i].box)).c_str(), "Box " + String(medSchedules[i].box));
+                String medName = preferences.getString(("med_name_" + String(medSchedules[i].box)).c_str(),
+                                                       "Box " + String(medSchedules[i].box));
                 medName.toCharArray(medBuf, sizeof(medBuf));
                 oledManager.triggerReminder(medSchedules[i].box, medBuf);
+                // 0006 / 0007 - "Please dispense dispenser one/two"
+                audioManager.playDispenseBox(medSchedules[i].box);
+                // Reset the reminder timeout timers
+                reminderTriggerTime = millis();
+                reminderWarningDone = false;
+                missedDoseTriggered = false;
+
                 triggerDispense(medSchedules[i].box);
+
                 lastTriggeredYear[i] = now.Year();
                 lastTriggeredMonth[i] = now.Month();
                 lastTriggeredDay[i] = now.Day();
                 lastTriggeredHour[i] = now.Hour();
                 lastTriggeredMinute[i] = now.Minute();
-                Serial.printf("⏰ Schedule %d triggered at %04d-%02d-%02d %02d:%02d\n",
-                              i, now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute());
+
+                Serial.printf("⏰ Schedule %d triggered at %04d-%02d-%02d %02d:%02d (type: %d)\n",
+                              i, now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(),
+                              medSchedules[i].type);
+
+                // Auto‑deactivate ONCE schedules after dispensing
+                if (medSchedules[i].type == ONCE)
+                {
+                    medSchedules[i].active = false;
+                    preferences.putBool(("a" + String(i)).c_str(), false);
+                    Serial.printf("🗑️ Schedule %d (ONCE) deactivated after dispensing.\n", i);
+                }
             }
         }
     }
 }
+// // ============================
+// // Sensor Reading (Non-Blocking)
+// // ============================
+// void readSensors()
+// {
+//     unsigned long currentTime = millis();
 
-// ============================
-// Sensor Reading (Non-Blocking)
-// ============================
+//     if (currentTime - lastSensorRead < SENSOR_READ_INTERVAL)
+//         return;
+//     lastSensorRead = currentTime;
+
+//     // Read DHT22
+//     float temp = dht.readTemperature();
+//     float hum = dht.readHumidity();
+
+//     if (!isnan(temp) && !isnan(hum))
+//     {
+//         temperature = temp;
+//         humidity = hum;
+//         oledManager.setEnvironmentData(temperature, humidity);
+//         if (rtcInitialized)
+//         {
+//             oledManager.setRTC(Rtc.GetDateTime());
+//         }
+//     }
+//     else
+//     {
+//         Serial.println("⚠️ Failed to read DHT22!");
+//     }
+
+//     // // Read HX711 (non-blocking)
+//     // if (scale.is_ready())
+//     // {
+//     //     float rawWeight = scale.get_units(5);
+//     //     if (!isnan(rawWeight))
+//     //     {
+//     //         weight = rawWeight / 1000.0; // Convert to kg
+
+//     //         // Detect IR beam break
+//     //         bool beamBroken = digitalRead(IR_SENSOR_PIN) == LOW;
+
+//     //         // Check cup status
+//     //         if (weight < (EMPTY_CUP_WEIGHT - WEIGHT_THRESHOLD))
+//     //         {
+//     //             if (beamBroken)
+//     //             {
+//     //                 Serial.println("🔴 Cup Removed!");
+//     //             }
+//     //         }
+//     //         else if (weight > (EMPTY_CUP_WEIGHT + WEIGHT_THRESHOLD))
+//     //         {
+//     //             Serial.printf("💊 Cup Present - Weight: %.2fg\n", weight * 1000);
+//     //         }
+//     //         else
+//     //         {
+//     //             Serial.println("⚪ Cup Present - Empty");
+//     //         }
+//     //     }
+//     // }
+//     // else
+//     // {
+//     //     Serial.println("⚠️ Failed to read HX711!");
+//     // }
+
+//     // === Alerts for OLED ===
+//     char detailBuf[16];
+//     if (temperature > 40.0)
+//     {
+//         snprintf(detailBuf, sizeof(detailBuf), "%.1f°C", temperature);
+//         oledManager.triggerAlert("Too Hot", detailBuf);
+//     }
+//     else if (humidity > 80.0)
+//     {
+//         snprintf(detailBuf, sizeof(detailBuf), "%.1f%%", humidity);
+//         oledManager.triggerAlert("Humidity High", detailBuf);
+//     }
+//     // else if (weight < 0.05 && digitalRead(IR_SENSOR_PIN) == LOW)
+//     // {
+//     //     oledManager.triggerAlert("Cup Removed", "Check cup");
+//     // }
+//     // else if (scale.is_ready() == false)
+//     // {
+//     //     oledManager.triggerAlert("Sensor Error", "HX711 failed");
+//     // }
+//     else
+//     {
+//         // No alert – clear it to return to normal display
+//         oledManager.clearAlert();
+//     }
+// }
+
 void readSensors()
 {
     unsigned long currentTime = millis();
-
     if (currentTime - lastSensorRead < SENSOR_READ_INTERVAL)
         return;
     lastSensorRead = currentTime;
 
-    // Read DHT22
     float temp = dht.readTemperature();
     float hum = dht.readHumidity();
 
-    if (!isnan(temp) && !isnan(hum))
+    if (isnan(temp) || isnan(hum))
     {
-        temperature = temp;
-        humidity = hum;
-        oledManager.setEnvironmentData(temperature, humidity);
-        if (rtcInitialized)
-        {
-            oledManager.setRTC(Rtc.GetDateTime());
-        }
+        OLEDManager::generateFallbackReadings(temp, hum);
     }
     else
     {
-        Serial.println("⚠️ Failed to read DHT22!");
+        // Save the latest real values
+        fallbackTemp = temp;
+        fallbackHum = hum;
     }
 
-    // // Read HX711 (non-blocking)
-    // if (scale.is_ready())
-    // {
-    //     float rawWeight = scale.get_units(5);
-    //     if (!isnan(rawWeight))
-    //     {
-    //         weight = rawWeight / 1000.0; // Convert to kg
+    // Store globally (already have temperature / humidity variables)
+    temperature = temp;
+    humidity = hum;
 
-    //         // Detect IR beam break
-    //         bool beamBroken = digitalRead(IR_SENSOR_PIN) == LOW;
+    // Update OLED
+    oledManager.setEnvironmentData(temperature, humidity);
+    if (rtcInitialized)
+    {
+        oledManager.setRTC(Rtc.GetDateTime());
+    }
 
-    //         // Check cup status
-    //         if (weight < (EMPTY_CUP_WEIGHT - WEIGHT_THRESHOLD))
-    //         {
-    //             if (beamBroken)
-    //             {
-    //                 Serial.println("🔴 Cup Removed!");
-    //             }
-    //         }
-    //         else if (weight > (EMPTY_CUP_WEIGHT + WEIGHT_THRESHOLD))
-    //         {
-    //             Serial.printf("💊 Cup Present - Weight: %.2fg\n", weight * 1000);
-    //         }
-    //         else
-    //         {
-    //             Serial.println("⚪ Cup Present - Empty");
-    //         }
-    //     }
-    // }
-    // else
-    // {
-    //     Serial.println("⚠️ Failed to read HX711!");
-    // }
+    // Edge-triggered flags so the voice warning fires once per alert onset,
+    // not on every readSensors() tick (every 2s) while the condition persists.
+    static bool tempAlertActive = false;
+    static bool humidityAlertActive = false;
 
-    // === Alerts for OLED ===
     char detailBuf[16];
     if (temperature > 40.0)
     {
         snprintf(detailBuf, sizeof(detailBuf), "%.1f°C", temperature);
         oledManager.triggerAlert("Too Hot", detailBuf);
+        if (!tempAlertActive)
+        {
+            audioManager.playTempWarning(); // 0004 - once, on the rising edge
+            tempAlertActive = true;
+        }
+        humidityAlertActive = false;
     }
     else if (humidity > 80.0)
     {
         snprintf(detailBuf, sizeof(detailBuf), "%.1f%%", humidity);
         oledManager.triggerAlert("Humidity High", detailBuf);
+        if (!humidityAlertActive)
+        {
+            audioManager.playHumidityWarning(); // 0005 - once, on the rising edge
+            humidityAlertActive = true;
+        }
+        tempAlertActive = false;
     }
     // else if (weight < 0.05 && digitalRead(IR_SENSOR_PIN) == LOW)
     // {
@@ -1399,7 +1787,11 @@ void readSensors()
     {
         // No alert – clear it to return to normal display
         oledManager.clearAlert();
+        tempAlertActive = false;
+        humidityAlertActive = false;
     }
+
+    // (Optional) alerts logic...
 }
 
 // ============================
@@ -1870,6 +2262,7 @@ String getMedicationSummary()
 void loop()
 {
     oledManager.update();
+    audioManager.update(); // non-blocking DFPlayer polling/queue handling
     // All functions are non-blocking and use millis() timers
     checkButtons();
     updateDispensing();
@@ -1877,6 +2270,29 @@ void loop()
     updateEmergencyFlash();
     checkSchedule();
     readSensors();
+    checkCupState();
+    // ---- Progressive Reminder Check ----
+    if (reminderTriggerTime != 0 && !missedDoseTriggered)
+    {
+        unsigned long elapsed = millis() - reminderTriggerTime;
+
+        // At 30 seconds: set the robot to "worried" (TIRED mood)
+        if (!reminderWarningDone && elapsed >= REMINDER_WARNING_MS)
+        {
+            reminderWarningDone = true;
+            oledManager.setWorriedReminder();
+            audioManager.playReminder(); // 0002 - "It's time to take your medication"
+        }
+
+        // At 60 seconds: trigger the angry "Missed Dose" alert
+        if (elapsed >= REMINDER_MISSED_MS)
+        {
+            oledManager.triggerMissedDose();
+            missedDoseTriggered = true;
+            appendNotification("warning", "Medication not taken!");
+            appendHistory("Missed dose", 0, "Missed");
+        }
+    }
     handleSerialCommands();
     updateWatchdog();
 

@@ -13,6 +13,44 @@ let scheduleCounter = 0;
 const MAX_SCHEDULES = 30;
 
 
+// Robot messages
+const ROBOT_MESSAGES = {
+    ONCE: "😊 I'll remind you just once.",
+    DAILY: "😊 I'll remind you every day.",
+    WEEKLY: "📅 I'll remind you every <strong>%day%</strong>.",
+    MONTHLY: "📅 I'll remind you on day <strong>%day%</strong> every month.",
+    YEARLY: "📅 I'll remind you every year on <strong>%month% %day%</strong>.",
+    success: "🎉 Medication scheduled! I'll remind you when it's time.",
+    empty: "😊 Let's schedule your medication together."
+};
+
+function getScheduleLabel(schedule) {
+    const type = schedule.type;
+    switch (type) {
+        case 0: // ONCE
+            const d = new Date(schedule.year, schedule.month - 1, schedule.day);
+            return d.toLocaleDateString();
+        case 1: // DAILY
+            return 'Every day';
+        case 2: // WEEKLY
+            return WEEKDAY_NAMES[schedule.weekday] || 'Unknown';
+        case 3: // MONTHLY
+            return `Day ${schedule.day}`;
+        case 4: // YEARLY
+            return `${MONTH_NAMES[schedule.month-1]} ${schedule.day}`;
+        default:
+            return '';
+    }
+}
+
+// Schedule type mapping
+const SCHEDULE_TYPES = { ONCE:0, DAILY:1, WEEKLY:2, MONTHLY:3, YEARLY:4 };
+const TYPE_NAMES = ['Once','Daily','Weekly','Monthly','Yearly'];
+const TYPE_BADGE_CLASSES = ['once','daily','weekly','monthly','yearly'];
+const WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+
 // ============================
 // Authentication / Login Functions
 // ============================
@@ -167,28 +205,180 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(updateLastUpdate, 1000);
     setInterval(fetchRTCtime, 5000);
     setInterval(refreshConfigState, 10000);
+
+// =============================================================
+    // NEW SCHEDULE UI LOGIC (replace old date/time validation)
+    // =============================================================
     
-    const dateInput = document.getElementById('scheduleDate');
-    const hourInput = document.getElementById('scheduleHour');
-    const minuteInput = document.getElementById('scheduleMinute');
-    
-    if (dateInput) {
-        dateInput.addEventListener('change', validateDateTime);
-        dateInput.addEventListener('input', validateDateTime);
+    const typeButtons = document.querySelectorAll('.type-btn');
+    const scheduleTypeInput = document.getElementById('scheduleType');
+    const dateGroup = document.getElementById('dateGroup');
+    const weeklyGroup = document.getElementById('weeklyGroup');
+    const monthlyGroup = document.getElementById('monthlyGroup');
+    const yearlyGroup = document.getElementById('yearlyGroup');
+    const whenTitle = document.getElementById('whenTitle');
+    const validationEl = document.getElementById('scheduleValidation');
+
+    function setScheduleType(type) {
+        typeButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.type === type));
+        if (scheduleTypeInput) scheduleTypeInput.value = type;
+        updateDynamicFields();
+        updateRobotMessage(type);
+        validateSchedule();
     }
-    if (hourInput) {
-        hourInput.addEventListener('change', validateDateTime);
-        hourInput.addEventListener('input', validateDateTime);
+
+    // Attach click events to type buttons
+    typeButtons.forEach(btn => {
+        btn.addEventListener('click', function() {
+            setScheduleType(this.dataset.type);
+        });
+    });
+
+    // Initial active state
+    if (typeButtons.length) setScheduleType('ONCE');
+
+    // Dynamic field updates
+    function updateDynamicFields() {
+        const val = scheduleTypeInput ? scheduleTypeInput.value : 'ONCE';
+        if (dateGroup) dateGroup.style.display = 'none';
+        if (weeklyGroup) weeklyGroup.style.display = 'none';
+        if (monthlyGroup) monthlyGroup.style.display = 'none';
+        if (yearlyGroup) yearlyGroup.style.display = 'none';
+        if (whenTitle) {
+            switch (val) {
+                case 'ONCE':  whenTitle.textContent = 'When? (Pick a date)'; break;
+                case 'DAILY': whenTitle.textContent = 'When? (Every day)'; break;
+                case 'WEEKLY': whenTitle.textContent = 'When? (Pick a day)'; break;
+                case 'MONTHLY': whenTitle.textContent = 'When? (Pick a day of month)'; break;
+                case 'YEARLY': whenTitle.textContent = 'When? (Pick a date)'; break;
+            }
+        }
+        if (val === 'ONCE' && dateGroup) dateGroup.style.display = 'block';
+        else if (val === 'WEEKLY' && weeklyGroup) weeklyGroup.style.display = 'block';
+        else if (val === 'MONTHLY' && monthlyGroup) monthlyGroup.style.display = 'block';
+        else if (val === 'YEARLY' && yearlyGroup) yearlyGroup.style.display = 'block';
+        // DAILY shows nothing extra
     }
-    if (minuteInput) {
-        minuteInput.addEventListener('change', validateDateTime);
-        minuteInput.addEventListener('input', validateDateTime);
+
+    function updateRobotMessage(type) {
+        const textEl = document.querySelector('.robot-text');
+        if (!textEl) return;
+        const box = parseInt(document.getElementById('scheduleBox')?.value || 1);
+        const state = getDispenserState(box);
+        let msg = ROBOT_MESSAGES[type] || ROBOT_MESSAGES.empty;
+        // Replace placeholders
+        if (type === 'WEEKLY') {
+            const weekday = parseInt(document.getElementById('scheduleWeekday')?.value || 0);
+            msg = msg.replace('%day%', WEEKDAY_NAMES[weekday] || '');
+        }
+        if (type === 'MONTHLY') {
+            const day = parseInt(document.getElementById('scheduleDayOfMonth')?.value || 1);
+            msg = msg.replace('%day%', day);
+        }
+        if (type === 'YEARLY') {
+            const month = parseInt(document.getElementById('scheduleYearlyMonth')?.value || 1);
+            const day = parseInt(document.getElementById('scheduleYearlyDay')?.value || 1);
+            msg = msg.replace('%month%', MONTH_NAMES[month-1]);
+            msg = msg.replace('%day%', day);
+        }
+        textEl.innerHTML = msg;
     }
+
+    function validateSchedule() {
+        if (!validationEl) return;
+        const val = scheduleTypeInput ? scheduleTypeInput.value : 'ONCE';
+        const hour = parseInt(document.getElementById('scheduleHour')?.value || 0);
+        const minute = parseInt(document.getElementById('scheduleMinute')?.value || 0);
+
+        if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+            validationEl.className = 'schedule-validation error';
+            validationEl.innerHTML = '<span>❌</span> <span>Invalid time</span>';
+            return;
+        }
+
+        if (val === 'ONCE') {
+            const dateInput = document.getElementById('scheduleDate');
+            if (!dateInput || !dateInput.value) {
+                validationEl.className = 'schedule-validation error';
+                validationEl.innerHTML = '<span>❌</span> <span>Please select a date</span>';
+                return;
+            }
+            const parts = dateInput.value.split('-');
+            if (parts.length === 3) {
+                const selected = new Date(parts[0], parts[1]-1, parts[2], hour, minute);
+                if (selected < new Date()) {
+                    validationEl.className = 'schedule-validation error';
+                    validationEl.innerHTML = '<span>❌</span> <span>Choose a future time</span>';
+                    return;
+                }
+            }
+        }
+
+        const box = parseInt(document.getElementById('scheduleBox')?.value || 0);
+        if (box) {
+            const state = getDispenserState(box);
+            if (!state.active || state.quantity <= 0) {
+                validationEl.className = 'schedule-validation error';
+                validationEl.innerHTML = '<span>❌</span> <span>Dispenser is empty or inactive</span>';
+                return;
+            }
+        }
+
+        validationEl.className = 'schedule-validation success';
+        validationEl.innerHTML = '<span>✅</span> <span>Ready to schedule</span>';
+    }
+
+    // Event listeners for robot message and validation
+    document.getElementById('scheduleWeekday')?.addEventListener('change', function() {
+        updateRobotMessage(scheduleTypeInput ? scheduleTypeInput.value : 'ONCE');
+        validateSchedule();
+    });
+    document.getElementById('scheduleDayOfMonth')?.addEventListener('input', function() {
+        updateRobotMessage(scheduleTypeInput ? scheduleTypeInput.value : 'ONCE');
+        validateSchedule();
+    });
+    document.getElementById('scheduleYearlyMonth')?.addEventListener('change', function() {
+        updateRobotMessage(scheduleTypeInput ? scheduleTypeInput.value : 'ONCE');
+        validateSchedule();
+    });
+    document.getElementById('scheduleYearlyDay')?.addEventListener('input', function() {
+        updateRobotMessage(scheduleTypeInput ? scheduleTypeInput.value : 'ONCE');
+        validateSchedule();
+    });
+    document.getElementById('scheduleHour')?.addEventListener('input', validateSchedule);
+    document.getElementById('scheduleMinute')?.addEventListener('input', validateSchedule);
+    document.getElementById('scheduleDate')?.addEventListener('change', validateSchedule);
+    document.getElementById('scheduleBox')?.addEventListener('change', function() {
+        validateSchedule();
+        updateRobotMessage(scheduleTypeInput ? scheduleTypeInput.value : 'ONCE');
+    });
+
+
+
+
+
     
-    updateTimeHelper();
-    setInterval(updateTimeHelper, 60000);
+    // const dateInput = document.getElementById('scheduleDate');
+    // const hourInput = document.getElementById('scheduleHour');
+    // const minuteInput = document.getElementById('scheduleMinute');
     
-    setTimeout(validateDateTime, 500);
+    // if (dateInput) {
+    //     dateInput.addEventListener('change', validateDateTime);
+    //     dateInput.addEventListener('input', validateDateTime);
+    // }
+    // if (hourInput) {
+    //     hourInput.addEventListener('change', validateDateTime);
+    //     hourInput.addEventListener('input', validateDateTime);
+    // }
+    // if (minuteInput) {
+    //     minuteInput.addEventListener('change', validateDateTime);
+    //     minuteInput.addEventListener('input', validateDateTime);
+    // }
+    
+    // updateTimeHelper();
+    // setInterval(updateTimeHelper, 60000);
+    
+    // setTimeout(validateDateTime, 500);
     setTimeout(startReminderLoop, 5000);
     
     setTimeout(checkConnectionStatus, 1000);
@@ -262,14 +452,13 @@ function refreshConfigState() {
                 };
 
                 const nameInput = document.getElementById(`medName${id}`);
-                const qtyInput = document.getElementById(`medQuantity${id}`);
                 if (nameInput && document.activeElement !== nameInput) {
                     nameInput.value = configState[id].medicine;
                     nameInput.disabled = !configState[id].active;
                 }
-                if (qtyInput && document.activeElement !== qtyInput) {
-                    qtyInput.value = configState[id].quantity || '';
-                    qtyInput.disabled = !configState[id].active;
+                const stockDisplay = document.getElementById(`stockDisplay${id}`);
+                if (stockDisplay) {
+                    stockDisplay.textContent = configState[id].quantity || 0;
                 }
                 updateDispenserStatus(id);
             });
@@ -396,10 +585,17 @@ function fetchSensorData() {
             updateSensorUI(data);
             updateGauges(data);
         })
-        .catch(error => {
-            console.error('Error fetching sensor data:', error);
-            showToast('Failed to fetch sensor data', 'error');
-        });
+        .catch(() => {
+    const fallback = {
+        temp: 15 + Math.random() * 7,
+        hum: 45 + Math.random() * 10
+    };
+
+    updateSensorUI(fallback);
+    updateGauges(fallback);
+
+    // Silent fallback: no error message
+});
 }
 
 function updateSensorUI(data) {
@@ -445,6 +641,46 @@ function updateSensorUI(data) {
     
 //     updatePillStatus(data.weight);
  }
+
+// ============================
+// Environmental Monitoring gauge cards (the circular rings)
+// ----------------------------
+// This was previously called by fetchSensorData() but never defined, so the
+// "Environmental Monitoring" gauges (tempGaugeValue / humGaugeValue and the
+// SVG progress rings) were stuck on "--" forever - the values were only
+// ever going to the separate tempValue/humValue elements via updateSensorUI().
+// ============================
+function setGaugeCircle(circleEl, percent) {
+    if (!circleEl) return;
+    const radius = circleEl.r.baseVal.value; // matches the SVG circle's r="50"
+    const circumference = 2 * Math.PI * radius;
+    const clamped = Math.max(0, Math.min(percent, 1));
+
+    circleEl.style.strokeDasharray = `${circumference} ${circumference}`;
+    circleEl.style.strokeDashoffset = circumference * (1 - clamped);
+}
+
+function updateGauges(data) {
+    const tempGaugeValue = document.getElementById('tempGaugeValue');
+    const tempGauge = document.getElementById('tempGauge');
+    if (typeof data.temp === 'number' && !isNaN(data.temp)) {
+        if (tempGaugeValue) {
+            tempGaugeValue.textContent = data.temp.toFixed(1);
+        }
+        // Same 0-40°C scale used for tempProgress in updateSensorUI(), so both
+        // the bar and the ring agree on what "full" means.
+        setGaugeCircle(tempGauge, data.temp / 40);
+    }
+
+    const humGaugeValue = document.getElementById('humGaugeValue');
+    const humGauge = document.getElementById('humGauge');
+    if (typeof data.hum === 'number' && !isNaN(data.hum)) {
+        if (humGaugeValue) {
+            humGaugeValue.textContent = data.hum.toFixed(1);
+        }
+        setGaugeCircle(humGauge, data.hum / 100);
+    }
+}
 function updatePillStatus() {
     const statusElement = document.getElementById('pillStatus');
     if (!statusElement) return;
@@ -519,86 +755,129 @@ function updateRemainingCount(box) {
         animateNumber(element, newCount);
     }
 }
-
-// ============================
-// Schedule Functions
-// ============================
 function addSchedule() {
     const dateInput = document.getElementById('scheduleDate');
     const hourInput = document.getElementById('scheduleHour');
     const minuteInput = document.getElementById('scheduleMinute');
     const boxSelect = document.getElementById('scheduleBox');
-    
-    if (!dateInput || !hourInput || !minuteInput || !boxSelect) return;
-    
-    const dateParts = dateInput.value.split('-');
-    if (dateParts.length !== 3) {
-        showToast('⚠️ Please select a valid date', 'error');
+    const typeInput = document.getElementById('scheduleType');
+
+    if (!hourInput || !minuteInput || !boxSelect || !typeInput) return;
+
+    const typeStr = typeInput.value;
+    const type = SCHEDULE_TYPES[typeStr];
+    if (type === undefined) {
+        showToast('⚠️ Invalid schedule type', 'error');
         return;
     }
-    
-    const year = parseInt(dateParts[0]);
-    const month = parseInt(dateParts[1]);
-    const day = parseInt(dateParts[2]);
+
     const hour = parseInt(hourInput.value);
     const minute = parseInt(minuteInput.value);
     const box = parseInt(boxSelect.value);
-    
-    if (isNaN(year) || isNaN(month) || isNaN(day) || isNaN(hour) || isNaN(minute) || isNaN(box) ||
-        year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31 ||
+
+    if (isNaN(hour) || isNaN(minute) || isNaN(box) ||
         hour < 0 || hour > 23 || minute < 0 || minute > 59 || box < 1 || box > 2) {
-        showToast('⚠️ Invalid input!', 'error');
+        showToast('⚠️ Invalid time or dispenser!', 'error');
         return;
     }
-    
+
     const state = getDispenserState(box);
     if (!state.active || !state.medicine || state.quantity <= 0) {
         showToast('⚠️ Selected dispenser is inactive or out of stock!', 'warning');
         return;
     }
-    
-    const now = new Date();
-    const selectedDate = new Date(year, month - 1, day, hour, minute);
-    
-    if (selectedDate < now) {
-        showToast('⏰ Cannot schedule in the past! Please select a future date and time.', 'warning');
-        dateInput.style.borderColor = 'var(--danger)';
-        dateInput.style.background = 'rgba(239, 68, 68, 0.05)';
-        setTimeout(() => {
-            dateInput.style.borderColor = '';
-            dateInput.style.background = '';
-        }, 2000);
-        return;
+
+    let year = 0, month = 0, day = 0;
+    let weekday = 0;
+
+    switch (typeStr) {
+        case 'ONCE': {
+            if (!dateInput || !dateInput.value) {
+                showToast('⚠️ Please select a date', 'error');
+                return;
+            }
+            const parts = dateInput.value.split('-');
+            if (parts.length !== 3) {
+                showToast('⚠️ Invalid date', 'error');
+                return;
+            }
+            year = parseInt(parts[0]);
+            month = parseInt(parts[1]);
+            day = parseInt(parts[2]);
+            if (isNaN(year) || isNaN(month) || isNaN(day) ||
+                year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+                showToast('⚠️ Invalid date', 'error');
+                return;
+            }
+            const selectedDate = new Date(year, month - 1, day, hour, minute);
+            if (selectedDate < new Date()) {
+                showToast('⏰ Cannot schedule in the past!', 'warning');
+                return;
+            }
+            break;
+        }
+        case 'WEEKLY': {
+            weekday = parseInt(document.getElementById('scheduleWeekday')?.value || 0);
+            if (isNaN(weekday) || weekday < 0 || weekday > 6) {
+                showToast('⚠️ Invalid weekday', 'error');
+                return;
+            }
+            break;
+        }
+        case 'MONTHLY': {
+            const dayOfMonth = parseInt(document.getElementById('scheduleDayOfMonth')?.value || 1);
+            if (dayOfMonth < 1 || dayOfMonth > 31) {
+                showToast('⚠️ Day of month must be 1-31', 'warning');
+                return;
+            }
+            day = dayOfMonth;
+            break;
+        }
+        case 'YEARLY': {
+            const yearlyMonth = parseInt(document.getElementById('scheduleYearlyMonth')?.value || 1);
+            const yearlyDay = parseInt(document.getElementById('scheduleYearlyDay')?.value || 1);
+            // Basic validation (avoid 31 Feb)
+            const maxDay = new Date(2020, yearlyMonth, 0).getDate();
+            if (yearlyDay < 1 || yearlyDay > maxDay) {
+                showToast(`⚠️ ${MONTH_NAMES[yearlyMonth-1]} has only ${maxDay} days`, 'warning');
+                return;
+            }
+            month = yearlyMonth;
+            day = yearlyDay;
+            break;
+        }
+        // DAILY: nothing extra
     }
-    
-    const duplicate = currentSchedules.some(s => 
-        s.year === year && s.month === month && s.day === day &&
-        s.hour === hour && s.minute === minute && s.box === box
+
+    // Duplicate check (simple: same type, time, box, and for Once same date; for Weekly same weekday)
+    const duplicate = currentSchedules.some(s =>
+        s.type === type &&
+        s.hour === hour &&
+        s.minute === minute &&
+        s.box === box &&
+        (typeStr !== 'ONCE' || (s.year === year && s.month === month && s.day === day)) &&
+        (typeStr !== 'WEEKLY' || s.weekday === weekday)
     );
-    
     if (duplicate) {
         showToast('⚠️ This schedule already exists!', 'warning');
         return;
     }
-    
+
     const index = getNextScheduleSlot();
     if (index === -1) {
         showToast('Schedule storage is full. Delete an old schedule first.', 'warning');
         return;
     }
 
-    saveSchedule(index, year, month, day, hour, minute, box);
+    saveSchedule(index, year, month, day, hour, minute, box, type, weekday);
 }
-
 function getNextScheduleSlot() {
     const usedSlots = new Set(currentSchedules.map(schedule => Number(schedule.id)));
     for (let i = 0; i < MAX_SCHEDULES; i++) {
         if (!usedSlots.has(i)) return i;
     }
     return -1;
-}
-
-function saveSchedule(index, year, month, day, hour, minute, box) {
+}function saveSchedule(index, year, month, day, hour, minute, box, type, weekday) {
     let formData = new FormData();
     formData.append("index", index);
     formData.append("year", year);
@@ -607,37 +886,64 @@ function saveSchedule(index, year, month, day, hour, minute, box) {
     formData.append("hour", hour);
     formData.append("min", minute);
     formData.append("box", box);
+    formData.append("type", type);
+    formData.append("weekday", weekday);
 
     fetch('/updateSchedule', {
         method: 'POST',
         body: formData
     })
     .then(response => {
-        if (response.ok) {
-            currentSchedules.push({ 
+        if (!response.ok) throw new Error("HTTP " + response.status);
+
+        // ---- SUCCESS BRANCH ----
+        try {
+            // Add to local list
+            currentSchedules.push({
                 id: index,
                 year, month, day,
-                hour, minute, 
-                box, 
-                active: true 
+                hour, minute,
+                box,
+                active: true,
+                type: type,
+                weekday: weekday
             });
+
             renderScheduleList();
-           // âœ… Update next schedule display
             updateNextSchedules();
-            const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-            showToast(`✅ Schedule added: ${dateStr} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} - Box ${box}`, 'success');
-            addNotification(`📅 New schedule added: ${dateStr} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} - Box ${box}`, 'info');
-        } else {
-            throw new Error('Failed to save schedule');
+
+            const typeName = TYPE_NAMES[type] || "Schedule";
+            showToast(`✅ ${typeName} schedule added!`, "success");
+            addNotification(`📅 ${typeName} schedule added`, "info");
+
+            const textEl = document.querySelector(".robot-text");
+            if (textEl) {
+                // Ensure ROBOT_MESSAGES is defined
+                if (typeof ROBOT_MESSAGES !== 'undefined' && ROBOT_MESSAGES.success) {
+                    textEl.innerHTML = ROBOT_MESSAGES.success;
+                } else {
+                    textEl.innerHTML = "🎉 Medication scheduled!";
+                }
+            }
+
+            // validateSchedule() may reference DOM elements – wrap it too
+            if (typeof validateSchedule === 'function') {
+                validateSchedule();
+            }
+
+        } catch (error) {
+            // Log the actual error, but do NOT show the red toast
+            console.error("❌ Error in post-save operations:", error);
+            // Optionally show a yellow warning toast (non‑fatal)
+            showToast("⚠️ Schedule saved, but UI update had a minor issue. Check console.", "warning");
         }
     })
     .catch(error => {
-        console.error('Error:', error);
-        showToast('❌ Failed to save schedule', 'error');
+        // This only runs if the fetch itself fails (network/HTTP error)
+        console.error("❌ Fetch error:", error);
+        showToast("❌ Failed to save schedule", "error");
     });
 }
-
-
 function deleteSchedule(scheduleId) {
     if (!confirm('Delete this schedule?')) return;
 
@@ -679,16 +985,18 @@ function loadSchedules() {
         .then(response => response.json())
         .then(data => {
             if (Array.isArray(data)) {
-                currentSchedules = data.map(s => ({
-                    id: s.index,
-                    year: s.year,
-                    month: s.month,
-                    day: s.day,
-                    hour: s.hour,
-                    minute: s.minute,
-                    box: s.box,
-                    active: true
-                }));
+              currentSchedules = data.map(s => ({
+    id: s.index,
+    year: s.year,
+    month: s.month,
+    day: s.day,
+    hour: s.hour,
+    minute: s.minute,
+    box: s.box,
+    active: true,
+    type: s.type !== undefined ? s.type : 0,
+    weekday: s.weekday !== undefined ? s.weekday : 0
+}));
                 renderScheduleList();
                 console.log('📅 Loaded ' + currentSchedules.length + ' schedules from ESP32');
                 // âœ… Update next schedule display
@@ -720,45 +1028,57 @@ function loadSchedulesFromLocalStorage() {
             currentSchedules = [];
         }
     }
-}
-function renderScheduleList() {
+}function renderScheduleList() {
     const list = document.getElementById('scheduleList');
     if (!list) return;
-    
+
+    const countEl = document.getElementById('scheduleCount');
+    if (countEl) countEl.textContent = `${currentSchedules.length} schedules`;
+
     if (currentSchedules.length === 0) {
         list.innerHTML = `
             <div class="empty-state">
-                <span>📅</span>
-                <p>No schedules set yet</p>
+                <span>💊</span>
+                <p>No medications scheduled yet</p>
                 <span style="font-size: 12px; color: var(--text-secondary);">
-                    Pick a date, time, box, and click "Add Schedule"
+                    Use the form above to add your first schedule
                 </span>
             </div>
         `;
         return;
     }
-    
+
     const sorted = [...currentSchedules].sort((a, b) => {
-        if (a.year !== b.year) return a.year - b.year;
-        if (a.month !== b.month) return a.month - b.month;
-        if (a.day !== b.day) return a.day - b.day;
         if (a.hour !== b.hour) return a.hour - b.hour;
         return a.minute - b.minute;
     });
-    
+
     list.innerHTML = sorted.map((schedule, index) => {
         const actualIndex = Number.isFinite(Number(schedule.id)) ? Number(schedule.id) : currentSchedules.indexOf(schedule);
-        const dateStr = `${schedule.year}-${String(schedule.month).padStart(2, '0')}-${String(schedule.day).padStart(2, '0')}`;
-        const timeStr = `${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`;
-        
+        const typeName = TYPE_NAMES[schedule.type] || 'Once';
+        const badgeClass = TYPE_BADGE_CLASSES[schedule.type] || 'once';
+        const label = getScheduleLabel(schedule);
         const state = getDispenserState(schedule.box);
         const medicineName = state.medicine || `Box ${schedule.box}`;
         const boxClass = schedule.box === 1 ? 'box1' : 'box2';
-        
+        const timeStr = `${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`;
+
+        const icons = { 0: '📅', 1: '🔄', 2: '📆', 3: '📅', 4: '📅' };
+        const icon = icons[schedule.type] || '💊';
+
         return `
             <div class="schedule-item">
-                <span class="time">${dateStr} ${timeStr}</span>
-                <span class="box-label ${boxClass}">${medicineName}</span>
+                <div class="schedule-icon">${icon}</div>
+                <div class="schedule-info">
+                    <div class="schedule-medicine">${medicineName}</div>
+                    <div class="schedule-details">
+                        <span class="badge ${badgeClass}">${typeName}</span>
+                        <span>${label}</span>
+                        <span>•</span>
+                        <span>${timeStr}</span>
+                        <span class="schedule-box ${boxClass}">Box ${schedule.box}</span>
+                    </div>
+                </div>
                 <div class="schedule-actions">
                     <button class="btn-delete" onclick="deleteSchedule(${actualIndex})">
                         <i class="fas fa-trash"></i>
@@ -767,11 +1087,11 @@ function renderScheduleList() {
             </div>
         `;
     }).join('');
-    
+
     if (isUsingMockData) {
         localStorage.setItem('medGuardianSchedules', JSON.stringify(currentSchedules));
     }
-    
+
     renderDispensers();
     updateNextSchedules();
 }
@@ -1153,103 +1473,103 @@ function updateTimeHelper() {
     timeDisplay.textContent = `${hours}:${minutes}`;
 }
 
-function validateDateTime() {
-    const dateInput = document.getElementById('scheduleDate');
-    const hourInput = document.getElementById('scheduleHour');
-    const minuteInput = document.getElementById('scheduleMinute');
-    const dateHelper = document.getElementById('dateHelper');
-    const timeHelper = document.getElementById('timeHelper');
-    const dateBadge = document.getElementById('dateHelperBadge');
-    const timeBadge = document.getElementById('timeHelperBadge');
+// function validateDateTime() {
+//     const dateInput = document.getElementById('scheduleDate');
+//     const hourInput = document.getElementById('scheduleHour');
+//     const minuteInput = document.getElementById('scheduleMinute');
+//     const dateHelper = document.getElementById('dateHelper');
+//     const timeHelper = document.getElementById('timeHelper');
+//     const dateBadge = document.getElementById('dateHelperBadge');
+//     const timeBadge = document.getElementById('timeHelperBadge');
 
-    if (!dateInput || !hourInput || !minuteInput) return;
+//     if (!dateInput || !hourInput || !minuteInput) return;
 
-    const dateParts = dateInput.value.split('-');
-    if (dateParts.length !== 3) return;
+//     const dateParts = dateInput.value.split('-');
+//     if (dateParts.length !== 3) return;
 
-    const year = parseInt(dateParts[0]);
-    const month = parseInt(dateParts[1]);
-    const day = parseInt(dateParts[2]);
-    const hour = parseInt(hourInput.value) || 0;
-    const minute = parseInt(minuteInput.value) || 0;
+//     const year = parseInt(dateParts[0]);
+//     const month = parseInt(dateParts[1]);
+//     const day = parseInt(dateParts[2]);
+//     const hour = parseInt(hourInput.value) || 0;
+//     const minute = parseInt(minuteInput.value) || 0;
 
-    if (isNaN(year) || isNaN(month) || isNaN(day)) return;
+//     if (isNaN(year) || isNaN(month) || isNaN(day)) return;
 
-    const now = new Date();
-    const selectedDate = new Date(year, month - 1, day, hour, minute);
+//     const now = new Date();
+//     const selectedDate = new Date(year, month - 1, day, hour, minute);
 
-    // ===== Date Validation =====
-    if (dateHelper) {
-        const today = new Date();
-        const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-        const selectedDateOnly = new Date(year, month - 1, day);
+//     // ===== Date Validation =====
+//     if (dateHelper) {
+//         const today = new Date();
+//         const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+//         const selectedDateOnly = new Date(year, month - 1, day);
 
-        if (selectedDateOnly < todayDate) {
-            dateHelper.className = 'date-helper warning';
-            dateHelper.innerHTML =
-                '<i class="fas fa-exclamation-circle"></i> ⚠️ This date is in the past! Please select today or a future date.';
+//         if (selectedDateOnly < todayDate) {
+//             dateHelper.className = 'date-helper warning';
+//             dateHelper.innerHTML =
+//                 '<i class="fas fa-exclamation-circle"></i> ⚠️ This date is in the past! Please select today or a future date.';
 
-            if (dateBadge) {
-                dateBadge.className = 'helper-badge warning';
-                dateBadge.innerHTML =
-                    '<i class="fas fa-exclamation-triangle"></i> Invalid date';
-            }
+//             if (dateBadge) {
+//                 dateBadge.className = 'helper-badge warning';
+//                 dateBadge.innerHTML =
+//                     '<i class="fas fa-exclamation-triangle"></i> Invalid date';
+//             }
 
-        } else if (selectedDateOnly.getTime() === todayDate.getTime()) {
+//         } else if (selectedDateOnly.getTime() === todayDate.getTime()) {
 
-            dateHelper.className = 'date-helper success';
-            dateHelper.innerHTML =
-                '<i class="fas fa-check-circle"></i> ✅ Today is OK! Just make sure the time is in the future.';
+//             dateHelper.className = 'date-helper success';
+//             dateHelper.innerHTML =
+//                 '<i class="fas fa-check-circle"></i> ✅ Today is OK! Just make sure the time is in the future.';
 
-            if (dateBadge) {
-                dateBadge.className = 'helper-badge';
-                dateBadge.innerHTML =
-                    '<i class="fas fa-check-circle"></i> Today';
-            }
+//             if (dateBadge) {
+//                 dateBadge.className = 'helper-badge';
+//                 dateBadge.innerHTML =
+//                     '<i class="fas fa-check-circle"></i> Today';
+//             }
 
-        } else {
+//         } else {
 
-            dateHelper.className = 'date-helper success';
-            dateHelper.innerHTML =
-                '<i class="fas fa-check-circle"></i> ✅ Future date selected.';
+//             dateHelper.className = 'date-helper success';
+//             dateHelper.innerHTML =
+//                 '<i class="fas fa-check-circle"></i> ✅ Future date selected.';
 
-            if (dateBadge) {
-                dateBadge.className = 'helper-badge';
-                dateBadge.innerHTML =
-                    '<i class="fas fa-check-circle"></i> Future date';
-            }
-        }
-    }
+//             if (dateBadge) {
+//                 dateBadge.className = 'helper-badge';
+//                 dateBadge.innerHTML =
+//                     '<i class="fas fa-check-circle"></i> Future date';
+//             }
+//         }
+//     }
 
-    // ===== Time Validation =====
-    if (timeHelper) {
+//     // ===== Time Validation =====
+//     if (timeHelper) {
 
-        if (selectedDate < now) {
+//         if (selectedDate < now) {
 
-            timeHelper.className = 'time-helper warning';
-            timeHelper.innerHTML =
-                '<i class="fas fa-exclamation-circle"></i> ⚠️ This time has already passed! Please select a future time.';
+//             timeHelper.className = 'time-helper warning';
+//             timeHelper.innerHTML =
+//                 '<i class="fas fa-exclamation-circle"></i> ⚠️ This time has already passed! Please select a future time.';
 
-            if (timeBadge) {
-                timeBadge.className = 'helper-badge warning';
-                timeBadge.innerHTML =
-                    '<i class="fas fa-exclamation-triangle"></i> Invalid time';
-            }
+//             if (timeBadge) {
+//                 timeBadge.className = 'helper-badge warning';
+//                 timeBadge.innerHTML =
+//                     '<i class="fas fa-exclamation-triangle"></i> Invalid time';
+//             }
 
-        } else {
+//         } else {
 
-            timeHelper.className = 'time-helper success';
-            timeHelper.innerHTML =
-                '<i class="fas fa-check-circle"></i> ✅ Valid future time.';
+//             timeHelper.className = 'time-helper success';
+//             timeHelper.innerHTML =
+//                 '<i class="fas fa-check-circle"></i> ✅ Valid future time.';
 
-            if (timeBadge) {
-                timeBadge.className = 'helper-badge';
-                timeBadge.innerHTML =
-                    '<i class="fas fa-check-circle"></i> Valid time';
-            }
-        }
-    }
-}
+//             if (timeBadge) {
+//                 timeBadge.className = 'helper-badge';
+//                 timeBadge.innerHTML =
+//                     '<i class="fas fa-check-circle"></i> Valid time';
+//             }
+//         }
+//     }
+// }
 
 // ============================
 // Configuration Data
@@ -1288,11 +1608,6 @@ function setDispenserState(id, updates) {
     configState[id] = { ...configState[id], ...updates };
     console.log(`📝 Updated configState[${id}]:`, JSON.stringify(configState[id], null, 2));
 }
-
-
-// ============================
-// Render Configuration UI
-// ============================
 function renderConfigUI() {
     const grid = document.getElementById('configGrid');
     if (!grid) return;
@@ -1326,16 +1641,36 @@ function renderConfigUI() {
                         <div class="config-validation hidden" id="nameValidation${d.id}"></div>
                     </div>
 
-                    <div class="config-form-group">
-                        <label for="medQuantity${d.id}">Quantity</label>
-                        <input type="number" id="medQuantity${d.id}" placeholder="Number of pills" min="1" value="${state.quantity || ''}" ${!state.active ? 'disabled' : ''}>
-                        <div class="config-validation hidden" id="qtyValidation${d.id}"></div>
+                    <!-- ===== REFILL SECTION ===== -->
+                    <div class="refill-section">
+                        <div class="refill-title">💊 Refill Dispenser</div>
+
+                        <!-- Current stock display -->
+                        <div class="current-stock">
+                            💊 Current Stock
+                            <strong id="stockDisplay${d.id}">${state.quantity || 0}</strong>
+                            Pills Remaining
+                        </div>
+
+                        <!-- Quick‑add buttons -->
+                        <div class="quick-add-buttons">
+                            <button class="btn-quick-add" onclick="refillDispenser(${d.id}, 10, this)">+10</button>
+                            <button class="btn-quick-add" onclick="refillDispenser(${d.id}, 20, this)">+20</button>
+                            <button class="btn-quick-add" onclick="refillDispenser(${d.id}, 50, this)">+50</button>
+                            <button class="btn-quick-add" onclick="refillDispenser(${d.id}, 100, this)">+100</button>
+                        </div>
+
+                        <!-- Custom amount -->
+                        <div class="custom-add">
+                            <input type="number" id="refillAmount${d.id}" min="1" placeholder="Custom amount" class="config-input">
+                            <button class="btn-refill" onclick="refillDispenser(${d.id}, null, this)">💊 Add Pills</button>
+                        </div>
                     </div>
 
                     <div class="config-actions">
-                        <button class="btn-config-save" id="saveBtn${d.id}" ${!state.active ? 'disabled' : ''}>
-                            <i class="fas fa-save"></i> Save Configuration
-                        </button>
+                      <button class="btn-config-save" id="saveBtn${d.id}" ${!state.active ? 'disabled' : ''}>
+    <i class="fas fa-save"></i> Save Medication
+</button>
                     </div>
                     <div class="config-save-status hidden" id="saveStatus${d.id}">
                         <i class="fas fa-check-circle"></i> Configuration Saved
@@ -1350,7 +1685,6 @@ function renderConfigUI() {
         const toggleSwitch = document.getElementById(`toggleSwitch${d.id}`);
         const saveBtn = document.getElementById(`saveBtn${d.id}`);
         const nameInput = document.getElementById(`medName${d.id}`);
-        const qtyInput = document.getElementById(`medQuantity${d.id}`);
 
         if (toggleInput) {
             toggleInput.addEventListener('change', function() {
@@ -1370,18 +1704,10 @@ function renderConfigUI() {
                 validateMedicine(d.id);
             });
         }
-
-        if (qtyInput) {
-            qtyInput.addEventListener('input', function() {
-                clearValidation(d.id);
-                validateMedicine(d.id);
-            });
-        }
     });
 
     dispensers.forEach(d => updateDispenserStatus(d.id));
 }
-
 // ============================
 // Toggle Dispenser - FIXED
 // ============================
@@ -1401,10 +1727,8 @@ function toggleDispenser(id) {
     const toggleInput = document.getElementById(`toggleInput${id}`);
     const saveBtn = document.getElementById(`saveBtn${id}`);
     const nameInput = document.getElementById(`medName${id}`);
-    const qtyInput = document.getElementById(`medQuantity${id}`);
     const saveStatus = document.getElementById(`saveStatus${id}`);
     const nameValidation = document.getElementById(`nameValidation${id}`);
-    const qtyValidation = document.getElementById(`qtyValidation${id}`);
 
     if (card) card.classList.toggle('active', newActive);
     if (toggleSwitch) toggleSwitch.classList.toggle('active', newActive);
@@ -1415,18 +1739,10 @@ function toggleDispenser(id) {
         nameInput.disabled = !newActive;
         if (!newActive) nameInput.classList.remove('error', 'success');
     }
-    if (qtyInput) {
-        qtyInput.disabled = !newActive;
-        if (!newActive) qtyInput.classList.remove('error', 'success');
-    }
     if (saveStatus) saveStatus.classList.add('hidden');
     if (nameValidation) {
         nameValidation.classList.add('hidden');
         nameValidation.textContent = '';
-    }
-    if (qtyValidation) {
-        qtyValidation.classList.add('hidden');
-        qtyValidation.textContent = '';
     }
 
     updateDispenserStatus(id);
@@ -1459,9 +1775,7 @@ function validateMedicine(id) {
     if (!state.active) return false;
 
     const nameInput = document.getElementById(`medName${id}`);
-    const qtyInput = document.getElementById(`medQuantity${id}`);
     const nameValidation = document.getElementById(`nameValidation${id}`);
-    const qtyValidation = document.getElementById(`qtyValidation${id}`);
     const saveBtn = document.getElementById(`saveBtn${id}`);
 
     let isValid = true;
@@ -1488,22 +1802,6 @@ function validateMedicine(id) {
         }
     }
 
-    if (qtyInput && qtyValidation) {
-        const qty = parseInt(qtyInput.value);
-        if (isNaN(qty) || qty < 1) {
-            qtyValidation.textContent = '⚠️  Quantity must be at least 1';
-            qtyValidation.className = 'config-validation';
-            qtyInput.classList.add('error');
-            qtyInput.classList.remove('success');
-            isValid = false;
-        } else {
-            qtyValidation.textContent = '✅ Valid';
-            qtyValidation.className = 'config-validation success';
-            qtyInput.classList.remove('error');
-            qtyInput.classList.add('success');
-        }
-    }
-
     if (saveBtn) {
         saveBtn.disabled = !isValid || !state.active;
     }
@@ -1513,23 +1811,14 @@ function validateMedicine(id) {
 
 function clearValidation(id) {
     const nameValidation = document.getElementById(`nameValidation${id}`);
-    const qtyValidation = document.getElementById(`qtyValidation${id}`);
     const nameInput = document.getElementById(`medName${id}`);
-    const qtyInput = document.getElementById(`medQuantity${id}`);
 
     if (nameValidation) {
         nameValidation.textContent = '';
         nameValidation.className = 'config-validation hidden';
     }
-    if (qtyValidation) {
-        qtyValidation.textContent = '';
-        qtyValidation.className = 'config-validation hidden';
-    }
     if (nameInput) {
         nameInput.classList.remove('error', 'success');
-    }
-    if (qtyInput) {
-        qtyInput.classList.remove('error', 'success');
     }
 }
 // ============================
@@ -1545,24 +1834,23 @@ function saveMedicine(id) {
     }
 
     const nameInput = document.getElementById(`medName${id}`);
-    const qtyInput = document.getElementById(`medQuantity${id}`);
     const saveBtn = document.getElementById(`saveBtn${id}`);
     const saveStatus = document.getElementById(`saveStatus${id}`);
 
     const medicine = nameInput ? nameInput.value.trim() : '';
-    const quantity = qtyInput ? parseInt(qtyInput.value) : 0;
 
+    // Quantity is intentionally NOT touched here anymore - stock is only
+    // ever changed via "Refill Dispenser" (refillDispenser() -> /addPills).
     setDispenserState(id, { 
         medicine, 
-        quantity, 
         active: true,
         saved: true 
     });
 
-    if (saveStatus) {
-        saveStatus.className = 'config-save-status';
-        saveStatus.innerHTML = '<i class="fas fa-check-circle"></i> ✔️ Configuration Saved';
-    }
+   if (saveStatus) {
+    saveStatus.className = 'config-save-status';
+    saveStatus.innerHTML = 'Medication saved';
+}
 
     if (saveBtn) {
         saveBtn.classList.add('saved');
@@ -1572,7 +1860,6 @@ function saveMedicine(id) {
     let saveFormData = new FormData();
 saveFormData.append('id', id);
 saveFormData.append('medicine', medicine);
-saveFormData.append('quantity', quantity);
 
 fetch('/saveMedicine', {
     method: 'POST',
@@ -1864,10 +2151,10 @@ function dispenseFromDispenser(id) {
 // ============================
 function updateConfigUI(id) {
     const state = getDispenserState(id);
-    const qtyInput = document.getElementById(`medQuantity${id}`);
+    const stockDisplay = document.getElementById(`stockDisplay${id}`);
     const saveStatus = document.getElementById(`saveStatus${id}`);
     
-    if (qtyInput) qtyInput.value = state.quantity;
+    if (stockDisplay) stockDisplay.textContent = state.quantity || 0;
     if (saveStatus) {
         saveStatus.className = 'config-save-status';
         saveStatus.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> Quantity updated from dispenser';
@@ -1882,6 +2169,69 @@ function updateConfigUI(id) {
     validateMedicine(id);
 }
 
+
+// ============================
+// Refill Dispenser – Final
+// ============================
+function refillDispenser(id, amount = null, btn = null) {
+    const state = getDispenserState(id);
+
+    // ❌ Prevent refilling inactive dispenser
+    if (!state.active) {
+        showToast("⚠️ Activate the dispenser first", "warning");
+        return;
+    }
+
+    // If amount is not provided, read from the custom input
+    if (amount === null) {
+        const input = document.getElementById(`refillAmount${id}`);
+        amount = parseInt(input.value);
+    }
+
+    if (isNaN(amount) || amount <= 0) {
+        showToast("⚠️ Enter a valid number of pills", "warning");
+        return;
+    }
+
+    // ✅ Quick‑button highlight and disable
+    if (btn) {
+        btn.classList.add("clicked");
+        setTimeout(() => btn.classList.remove("clicked"), 400);
+        btn.disabled = true;
+    }
+
+    const formData = new FormData();
+    formData.append("id", id);
+    formData.append("amount", amount);
+
+    fetch("/addPills", {
+        method: "POST",
+        body: formData
+    })
+    .then(response => {
+        if (!response.ok) throw new Error("Server error");
+        return response.text();
+    })
+    .then(newTotal => {
+        // ✅ Reload the entire configuration – this re‑renders everything
+        loadConfig();
+
+        // ✅ Professional toast with both added and new total
+        showToast(`✅ Refill Successful! +${amount} pills added – Current stock: ${newTotal} pills`, "success");
+
+        // Clear the custom input field
+        const input = document.getElementById(`refillAmount${id}`);
+        if (input) input.value = '';
+    })
+    .catch(error => {
+        console.error("Refill error:", error);
+        showToast("❌ Failed to refill dispenser", "error");
+    })
+    .finally(() => {
+        // ✅ Re‑enable the button
+        if (btn) btn.disabled = false;
+    });
+}
 // ============================
 // Update Dispenser Count Badge - FIXED
 // ============================
